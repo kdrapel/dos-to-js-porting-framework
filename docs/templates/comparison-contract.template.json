@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "Real-input bounded interval",
+  "evidence_class": "bounded_original_execution_vs_translation",
+  "registers": [],
+  "memory_ranges": [
+    { "name": "output", "address": "0x0", "length": 1 }
+  ],
+  "whole_memory": false,
+  "ordered_writes": false,
+  "stop_reasons": {
+    "reference": ["reached_stop_address"],
+    "javascript": ["completed"]
+  },
+  "exclusions": [
+    "Agent must replace the illustrative output range, declare live register/flag observables, and justify exclusions before testing. This template alone is not a verified routine contract."
+  ]
+}

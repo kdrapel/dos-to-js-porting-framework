@@ -1,0 +1,74 @@
+{
+  "version": 2,
+  "output_directory": "oracle/extract",
+  "trigger": {
+    "type": "emulated_time",
+    "interval_ms": 1000,
+    "initial_delay_ms": 0
+  },
+  "process": {
+    "mode": "current_or_next",
+    "on_exit": "stop"
+  },
+  "assets": {
+    "registers": {
+      "enabled": true,
+      "every_n_captures": 1
+    },
+    "screenshot": {
+      "enabled": true,
+      "format": "png",
+      "every_n_captures": 1
+    },
+    "machine_state": {
+      "enabled": true,
+      "every_n_captures": 1
+    },
+    "vga_state": {
+      "enabled": true,
+      "include_palette": true,
+      "include_registers": true,
+      "every_n_captures": 1
+    },
+    "framebuffer": {
+      "enabled": true,
+      "mode": "active",
+      "every_n_captures": 1
+    },
+    "device_state": {
+      "enabled": true,
+      "every_n_captures": 1
+    },
+    "x87_state": {
+      "enabled": true,
+      "every_n_captures": 1
+    },
+    "render_surface": {
+      "enabled": true,
+      "every_n_captures": 1
+    }
+  },
+  "memory": [
+    {
+      "name": "main",
+      "segment": "0008",
+      "offset": "00000000",
+      "length": "00800000",
+      "every_n_captures": 1
+    }
+  ],
+  "events": {
+    "enabled": true,
+    "video_mode_change": true,
+    "process_exit": true,
+    "execution_addresses": []
+  },
+  "on_capture_error": "stop",
+  "reference": {
+    "enabled": false,
+    "expected_cycles": 0,
+    "trace_instructions": false,
+    "start_at_first_address": false,
+    "max_events": 1000000
+  }
+}

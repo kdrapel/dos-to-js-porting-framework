@@ -1,0 +1,3461 @@
+diff --git a/docs/automatic-capture.md b/docs/automatic-capture.md
+new file mode 100644
+index 000000000..e6eeed78a
+--- /dev/null
++++ b/docs/automatic-capture.md
+@@ -0,0 +1,148 @@
++# Automatic Capture
++
++Automatic Capture is available in Debug builds. Open **Debug → Automatic capture** to select a configuration and control a session.
++
++The selected configuration path is kept for the current DOSBox-X process. Select it again after restarting DOSBox-X. Start attaches to the current non-shell DOS process, or arms the session and attaches to the next successfully executed DOS program. The session stops when the tracked process exits.
++
++## Configuration
++
++Select a UTF-8 JSON file with version `1`. Time intervals are measured from emulated execution time. Capture and file I/O therefore do not move the next deadline.
++
++To get a starting file, choose **Debug → Automatic capture → Generate example configuration...** and select a folder. DOSBox-X writes `automatic-capture-example.json` there (or a numbered name if one already exists) and selects it as the current configuration when no session is active. Its output directory is an `automatic-captures` subfolder of the selected folder. Edit the file before starting a session to adjust the interval, memory region, or enabled assets.
++
++```json
++{
++  "version": 1,
++  "output": {
++    "directory": "D:/captures/dosbox-x"
++  },
++  "trigger": {
++    "type": "emulated_time",
++    "interval_ms": 2000,
++    "initial_delay_ms": 1000
++  },
++  "process": {
++    "mode": "current_or_next",
++    "on_exit": "stop"
++  },
++  "capture": {
++    "screenshot": { "enabled": true, "format": "png" },
++    "registers": { "enabled": true, "format": "json" },
++    "memory": [
++      {
++        "name": "main",
++        "segment": "0008",
++        "offset": "00000000",
++        "length": "00040000",
++        "format": "binary"
++      }
++    ]
++  },
++  "error_handling": {
++    "on_capture_error": "continue"
++  }
++}
++```
++
++Memory `segment`, `offset`, and `length` are hexadecimal strings without a `0x` prefix. Region names may contain ASCII letters, digits, `_`, and `-`; names must be unique without regard to case. At least one asset must be enabled. Version 1 accepts `emulated_time`, `current_or_next`, `stop`, PNG screenshots, JSON registers, binary memory, and `continue` or `stop` capture error handling.
++
++## Session output
++
++Each Start creates a timestamped session directory below the configured output directory. A numeric suffix is added if the timestamp already exists.
++
++```text
++YYYY-MM-DD_HH-MM-SS/
++  session.json
++  capture_000000/
++    capture.json
++    registers.json
++    screenshot.png
++    memory_main_0008_00000000_00040000.bin
++```
++
++Only enabled assets appear. Failed or partially readable assets are recorded in `capture.json`; unreadable memory bytes are zero-filled and mark that asset partial. Capture directories are staged as `.tmp` and finalized only after `capture.json` is written. `session.json` records the effective configuration, process association, final status, and capture count.
++
++Use **Capture now** to queue a one-off capture at the next safe point. It does not change the periodic deadline. **Status** shows the current state, session, tracked PSP, elapsed guest time, count, and next deadline. **Stop** finalizes the session; shutdown also finalizes an active session.
++
++## Version 2 oracle captures
++
++Version `1` remains the compatibility format: its configuration and output are unchanged. Version `2` adds optional stopped-state assets and independent asset cadence. It uses an `assets` object and puts memory regions at the root:
++
++```json
++{
++  "version": 2,
++  "output_directory": "D:/captures/demo",
++  "trigger": { "type": "emulated_time", "interval_ms": 200, "initial_delay_ms": 0 },
++  "assets": {
++    "screenshot": { "enabled": true, "format": "png", "every_n_captures": 1 },
++    "registers": { "enabled": true, "format": "json", "every_n_captures": 1 },
++    "machine_state": { "enabled": true, "every_n_captures": 1 },
++    "vga_state": { "enabled": true, "include_palette": true, "include_registers": true, "every_n_captures": 1 },
++    "framebuffer": { "enabled": true, "every_n_captures": 5 }
++  },
++  "memory": [
++    { "name": "main", "segment": "0008", "offset": "00000000", "length": "00400000", "every_n_captures": 25 }
++  ],
++  "events": { "enabled": true, "video_mode_change": true, "process_exit": true, "execution_addresses": [] },
++  "on_capture_error": "continue"
++}
++```
++
++`every_n_captures` defaults to `1`; capture numbering starts at zero, so a cadence of `5` writes captures 0, 5, 10, and so on. An asset deliberately omitted by cadence is recorded in `capture.json` as `skipped` with reason `cadence`; it is not a failure. Manual and event captures use the same sequence and cadence, preserving a single coherent timeline.
++
++`machine_state.json` records CR0, GDTR/IDTR, CPU mode/CPL, and each segment's current cached base plus decoded descriptor information when resolvable. Fields that cannot be resolved are explicitly represented as unavailable rather than synthesized.
++
++`vga_state.json` separates guest VGA state from the current screenshot encoder input. `guest_vga` describes the emulated adapter; `renderer_source` describes the renderer frame handed to the PNG encoder, including the encoder's horizontal/vertical doubling flags; and `renderer_output` is the corresponding encoder output geometry. The completed screenshot asset additionally records `metadata.screenshot_geometry`, whose `output_width` and `output_height` are read from the finalized PNG IHDR, so those values describe the exact file rather than an inferred scale. VGA state capture snapshots cached DAC values without using DAC I/O or changing its indices/component state. It can include raw DAC entries (at their native 6- or 8-bit precision), standard VGA register groups, dimensions, pitch, and LFB mapping information. `framebuffer.bin`, when available, is a raw copy of the active DOSBox-X VGA video-memory backing store; its provenance and interpretation metadata are in `capture.json`. It is marked `unavailable` if no coherent video-memory source exists.
++
++All successful assets record their finalized on-disk byte count in `capture.json`; the size is read only after the writer has flushed and closed the file. `tests/agent/verify_automatic_capture.ps1 -SessionDirectory <session>` validates a version-2 session, including finalized asset sizes, cadence skips, PNG geometry, machine-state segment fields, and DAC state fields. Pass `-Version1SessionDirectory <session>` to also check that a version-1 session still uses its compatibility status spelling and configuration/output shape.
++
++Version 2 execution metadata includes CS:EIP, the cached CS base, and its resolved linear instruction address. Without reference instrumentation the optional instruction counter remains `unavailable`; cycles are never substituted for instructions.
++
++The optional events are supplementary to the periodic guest-time schedule. Video mode transitions, configured current CS:EIP addresses, and tracked-process exit create event-labelled captures without changing the next periodic deadline. Without `reference.enabled`, address events are sampled/edge-triggered at CPU-dispatch safe points, **not** guaranteed instruction breakpoints.
++
++## Passive reference instrumentation (normal core only)
++
++The example reference configuration enables these opt-in version-2 assets; they do not issue guest port reads, timer latches, x87 instructions, keyboard input or synthetic clock values:
++
++- `device_state`: all three PIT blocks, projected live counts computed on copies, live latch/read/write phases, reloads, output/gate, exact emulator time base; both PICs' IRR/ISR/IMR/input/initialization state; scheduler entries; IBM keyboard/controller queues, output buffer/status, repeat/pending state.
++- `x87_state`: CW/SW/TOP, tags and all nine physical internal slots (slot 8 is scratch). Each slot identifies its authoritative encoding: extended80 or binary64. The backing80 field is **not** necessarily authoritative on the binary64 backend. No FNINIT/FNSAVE or tag normalization is performed.
++- `render_surface`: exact source-cache bytes passed to `CAPTURE_AddImage`, with width/height/bpp/pitch, the encoder's RGB8 palette, doubling flags, current/completed render epochs and times, processed lines, and updating/abort/overlay status. The PNG asset also records this metadata and checks it did not change during encoding. This separates conversion agreement from VGA/execution validation.
++
++`reference.enabled=true` checks for `core=normal` and fixed positive cycles, including pending automatic core/cycle switching. Optional `reference.expected_cycles` checks an exact positive fixed count (omitted or 0 means any fixed count at Start). A mismatch shows a warning with actual and expected settings: Yes ignores it and continues, No cancels capture (default). An ignored warning is recorded as `cpu_settings_override` and `cpu_trace_incomplete` in session/capture metadata and fails strict offline reference admission. Settings changes during capture are checked again; the initial fixed count is the baseline if no expected count was configured. Automatic cycle fluctuations do not repeat the popup after acknowledgment. Ignoring a different core does not add normal-core tracing to it: paired address triggers can remain unavailable. Normal-core pre-dispatch boundaries are counted after debugger-breakpoint checks. These are **not retired instruction counts**: faults/REP re-dispatch can repeat a PC. Traced fetch events observe bytes already read by the normal decoder, without extra guest-memory reads; they describe fetched opcode/operand bytes, not proof of successful retirement. This does not cover other CPU cores, callbacks' host implementation bytes, or auxiliary decoders.
++
++Address events accept `occurrence` (0 = every match; positive = that numbered match since process attachment), optional `previous_offset` (previous observed boundary at that offset in the same CS), and `stop_after_capture` (stop **capture session**, not guest). All matching filters have independent counters, including different occurrences of the same PC. `captureBoundary` records the boundary kind, filtered occurrence, global boundary number in `execution`, and last 64 CS:EIP/SS:ESP/time contexts. Match the actual call edge and captured return stack before identifying an invocation; a PC/ordinal alone is not proof.
++
++`reference.trace_instructions` enables boundary/register/flag/CW/SW and decoder-fetch JSONL records. Actual dispatched reads/writes on ports 40h–43h, 20h/21h/A0h/A1h, 60h/64h record values, widths, context, emulator timestamps and post-access device snapshots. I/O dispatch can include BIOS/internal calls; do not mislabel every event as a guest IN/OUT. IRQ activation requests/delivery, interrupt-entry and IRET requests, delivered key transitions, and actual INT16/AH=11h BIOS poll AX/ZF outcomes are observed. Requests are not successful-return events; subsequent boundaries show resumed CPU state.
++
++`reference.start_at_first_address=true` keeps full tracing off until the selected source event while retaining the context tail and occurrence counters. `max_events` (1..1,000,000; default 100,000) bounds buffered records **between successful captures**. Overflow makes the trace/capture `partial`, reports dropped events, and prevents silent equivalence claims. Failed/partial captures retain records for recovery. Trace intervals are flushed into each capture's `reference_trace.jsonl`; unfinished records are saved as `reference_tail.jsonl` on Stop. Concatenate capture traces chronologically, accounting for overlapping records after partial captures. Use `on_capture_error=stop` for reference work.
++
++Serialization is single-threaded at a stopped CPU boundary, but the renderer cache is from its own scanout/update epoch and can be partially updated. This is **not** synchronous instantaneous scanout, and no frame is rendered/forced to make it appear aligned. `framebuffer.bin` remains full `vga.mem.linear`; draw pitch/bpp do not describe its original guest-memory layout. The full standard CRTC fields and display-start/panning/chain state are now recorded. `render_surface` is separate and can independently reproduce the cached PNG.
++
++Known explicit gaps: pending host/SDL input queue and PS/2 mouse state; scheduler callback identities/restorable scheduler; x87 instruction/data pointers absent from the backing structure; complete SVGA/register banks and other device state. This is bounded observation, **not a whole-machine save state**. A no-key assumption is still not proof of an empty host queue. A new source-to-return trace can establish observed I/O values for one invocation without replacing all later polls/timer reads.
++
++Only the user runs DOSBox-X/DOSBox. Agents build and test offline. Set `core=normal` and record fixed CPU cycles, memory/DPMI settings, application hashes and intended input condition. Arm autocapture before launching the demo. A paired example selects the first observed call edge between two configured addresses and then captures the callee continuation before caller continuation; verify `[SS:ESP]` is the expected return at source and the endpoint trace belongs to that source. Selectors/ordinals are corpus-specific and must be corrected if the new run allocates different selectors. The one-hour periodic delay avoids arbitrary periodic-PC comparisons; it does not impose a clock model. The endpoint stops only the capture session. Keep the original launch/configuration and provide both capture directories, session metadata, traces and build manifest.
++
++Build without running the emulator:
++
++```powershell
++& 'C:/Program Files/Microsoft Visual Studio/18/Professional/MSBuild/Current/Bin/MSBuild.exe' vs/dosbox-x.sln '/p:Configuration=Agent Debug SDL2' /p:Platform=x64 /m:4 /v:quiet /nologo '/flp:logfile=autocapture-reference-build.log;verbosity=normal'
++& 'C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/Tools/Launch-VsDevShell.ps1' -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
++python tests/agent/test_reference_capture_offline.py
++./tests/agent/write_reference_build_manifest.ps1
++```
++
++The offline test compiles actual PIT code in an isolated unit-test harness; fixture clocks are test inputs, never oracle evidence. The manifest hashes the binary and tracked producer sources; provide it alongside new user-run captures. A compile/test pass is not DOSBox-reference agreement. The current source commits do not by themselves identify the build that produced an existing capture corpus.
++
++### Guarded source/return pairing
++
++A paired example enables `pair_source` on the call entry and `pair_return` on its endpoint. Exactly one of each is required. The source requires `previous_offset` and a positive `occurrence`; the return requires `occurrence: 1` and `stop_after_capture: true`. Return occurrences count only after a successful source capture and only with the saved CS/SS selectors and bases plus the restored caller ESP. Visits before the source or on nested/different stacks cannot consume the endpoint occurrence.
++
++Pairing currently supports a 32-bit near call with a four-byte stack push and a return with no argument cleanup. A different source stack delta stops the session. This observes stack context; it does not decode/retire the CALL/RET or read the return-address word. Verify the saved return address from the captured memory and inspect the intervening trace offline. `captureBoundary.invocation_pair` links both captures using the source capture number and boundary and records source/caller ESP and segment bases. This guard does not prove that a guest jump with identical stack context is a RET. A failed source capture stops the paired session.
++
++Periodic reference sessions with instruction tracing disabled and no execution-address events count normal-core boundaries without per-instruction flag materialization, timestamp formatting or control-flow-tail allocation. Their control-flow tail is empty; device-event tracing and all configured snapshots remain enabled. Address-triggered sessions retain detailed boundary context.
++
++### BIOS timer callback evidence
++
++`device_state.json` now includes `bios_timer`: BDA timer/midnight/keyboard LED/floppy fields, CMOS synchronization flag/time fields, time-sync settings, platform flags and PIT rate. Reference event tracing also records `bios_timer_callback_enter` and `bios_timer_callback_exit`, each with the actual `INT8_Handler` binding, CPU/time/boundary context and the same state snapshot. They observe the host callback around its real effects; they do not invoke it, issue port reads or synthesize time. The normal decoder saves EIP after the four-byte FE 38 callback instruction, so these event contexts identify the instruction's continuation EIP.
++
++The current periodic configuration already enables these records through `reference.enabled`; full instruction tracing is unnecessary. Older sessions cannot supply these uncaptured host globals retrospectively. Rebuild provenance and a new user-run session are required to validate source-derived callback replay against observed before/after effects. Unimplemented LED/video callback branches remain explicit replay boundaries.
+diff --git a/include/autocapture.h b/include/autocapture.h
+new file mode 100644
+index 000000000..20039d4a9
+--- /dev/null
++++ b/include/autocapture.h
+@@ -0,0 +1,34 @@
++#ifndef DOSBOX_AUTOCAPTURE_H
++#define DOSBOX_AUTOCAPTURE_H
++
++#include <cstdint>
++#include <string>
++
++void AUTOCAP_SelectConfiguration();
++bool AUTOCAP_GenerateExampleConfiguration(const std::string& folder, std::string* path, std::string* error);
++void AUTOCAP_SetConfigurationPath(const std::string& path);
++bool AUTOCAP_Start(std::string* error);
++void AUTOCAP_Stop(const char* reason);
++void AUTOCAP_ReloadConfiguration(std::string* error);
++void AUTOCAP_RequestManualCapture();
++std::string AUTOCAP_FormatStatus();
++void AUTOCAP_OnProgramStart(const char* executable, uint16_t psp, uint16_t parent_psp);
++void AUTOCAP_OnProgramExit(uint16_t psp);
++void AUTOCAP_PumpSafePoint();
++bool AUTOCAP_IsActive();
++bool AUTOCAP_IsAttached();
++bool AUTOCAP_HasConfiguration();
++// Passive observers. Never read guest I/O ports or mutate device state.
++std::string AUTOCAP_PITStateJson();
++std::string AUTOCAP_PICStateJson();
++std::string AUTOCAP_KeyboardStateJson();
++std::string AUTOCAP_BIOSTimerStateJson();
++void AUTOCAP_RecordBIOSTimerEvent(const char* kind);
++bool AUTOCAP_WantsInstructionBoundary();
++void AUTOCAP_OnInstructionBoundary();
++void AUTOCAP_RecordInstructionFetch(uint32_t value, unsigned int width);
++void AUTOCAP_RecordIO(bool write, uint32_t port, uint32_t value, unsigned int width);
++void AUTOCAP_RecordEvent(const char* kind, uint32_t value);
++void AUTOCAP_RefreshMenuItems();
++
++#endif
+diff --git a/include/debug.h b/include/debug.h
+index f4ee552bb..f4a8e8901 100644
+--- a/include/debug.h
++++ b/include/debug.h
+@@ -31,6 +31,8 @@ void DEBUG_RefreshPage(char scroll);
+ Bitu DEBUG_EnableDebugger(void);
+ 
+ #if C_DEBUG
++bool DEBUG_DumpMemoryBinary(uint16_t segment, uint32_t offset, uint32_t length,
++		const std::string& output_path, uint64_t* unreadable, std::string* error);
+ bool DEBUG_AgentStep(bool over, bool* continued);
+ bool DEBUG_AgentResumeAfterTerminate(void);
+ bool DEBUG_AgentCanStartTarget(void);
+diff --git a/include/hardware.h b/include/hardware.h
+index 782b42765..dba6f533e 100644
+--- a/include/hardware.h
++++ b/include/hardware.h
+@@ -19,6 +19,7 @@
+ #pragma once
+ 
+ #include <stdio.h> // for FILE*, for OpenCaptureFile()
++#include <string>
+ 
+ class Section;
+ enum OPL_Mode {
+diff --git a/include/render.h b/include/render.h
+index ab0817f94..c5dd7b3f6 100644
+--- a/include/render.h
++++ b/include/render.h
+@@ -26,11 +26,23 @@
+ #define RENDER_USE_ADVANCED_SCALERS 3
+ 
+ #include "../src/gui/render_scalers.h"
++#include <cstdint>
++#include <string>
+ 
+ #define RENDER_SKIP_CACHE	16
+ //Enable this for scalers to support 0 input for empty lines
+ //#define RENDER_NULL_INPUT
+ 
++struct RenderScreenshotGeometry {
++	uint32_t source_width = 0;
++	uint32_t source_height = 0;
++	uint32_t source_bpp = 0;
++	bool double_width = false;
++	bool double_height = false;
++	uint32_t output_width = 0;
++	uint32_t output_height = 0;
++};
++
+ enum ASPECT_MODES {
+     ASPECT_FALSE = 0
+     ,ASPECT_TRUE
+@@ -189,6 +201,10 @@ extern ScalerLineHandler_t RENDER_DrawLine;
+ void RENDER_SetSize(Bitu width,Bitu height,Bitu bpp,float fps,double scrn_ratio);
+ bool RENDER_StartUpdate(void);
+ void RENDER_EndUpdate(bool abort);
++bool RENDER_SaveCurrentFramePng(const std::string& filename, std::string* error);
++bool RENDER_GetCurrentFrameScreenshotGeometry(RenderScreenshotGeometry* geometry);
++std::string RENDER_CaptureSurfaceMetadata();
++bool RENDER_SaveCaptureSurface(const std::string& filename, std::string* error);
+ void RENDER_SetPal(uint8_t entry,uint8_t red,uint8_t green,uint8_t blue);
+ bool RENDER_GetForceUpdate(void);
+ void RENDER_SetForceUpdate(bool);
+diff --git a/src/agent/protocol/agent_protocol.cpp b/src/agent/protocol/agent_protocol.cpp
+index a315ca19f..8af1a7141 100644
+--- a/src/agent/protocol/agent_protocol.cpp
++++ b/src/agent/protocol/agent_protocol.cpp
+@@ -1,4 +1,6 @@
+-#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
++#include "config.h"
++
++#if C_DEBUG
+ #include "agent/agent_protocol.h"
+ 
+ #include <cerrno>
+@@ -808,4 +810,4 @@ std::string AGENT_MakeJsonRpcError(const JsonValue& id,
+ }
+ 
+ } // namespace dosbox_agent
+-#endif // defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
++#endif // C_DEBUG
+diff --git a/src/cpu/core_normal.cpp b/src/cpu/core_normal.cpp
+index ddc317ac5..2d0a02af9 100644
+--- a/src/cpu/core_normal.cpp
++++ b/src/cpu/core_normal.cpp
+@@ -43,6 +43,7 @@ extern bool ignore_opcode_63;
+ 
+ #if C_DEBUG
+ #include "debug.h"
++#include "autocapture.h"
+ #endif
+ 
+ #define LoadMb(off) mem_readb_inline(off)
+@@ -135,17 +136,26 @@ static INLINE uint8_t FetchPeekb() {
+ 
+ static INLINE uint8_t Fetchb() {
+ 	uint8_t temp=LoadMb(core.cseip);
++#if C_DEBUG
++    AUTOCAP_RecordInstructionFetch(temp, 1);
++#endif
+ 	core.cseip+=1;
+ 	return temp;
+ }
+ 
+ static INLINE uint16_t Fetchw() {
+ 	uint16_t temp=LoadMw(core.cseip);
++#if C_DEBUG
++    AUTOCAP_RecordInstructionFetch(temp, 2);
++#endif
+ 	core.cseip+=2;
+ 	return temp;
+ }
+ static INLINE uint32_t Fetchd() {
+ 	uint32_t temp=LoadMd(core.cseip);
++#if C_DEBUG
++    AUTOCAP_RecordInstructionFetch(temp, 4);
++#endif
+ 	core.cseip+=4;
+ 	return temp;
+ }
+@@ -183,6 +193,9 @@ Bits CPU_Core_Normal_Run(void) {
+ 			return (Bits)debugCallback;
+ 		}
+ #endif
++        if (AUTOCAP_WantsInstructionBoundary()) {
++            AUTOCAP_OnInstructionBoundary();
++        }
+ #endif
+ 		cycle_count++;
+ restart_opcode:
+diff --git a/src/cpu/cpu.cpp b/src/cpu/cpu.cpp
+index 84b0e9a09..28f45925e 100644
+--- a/src/cpu/cpu.cpp
++++ b/src/cpu/cpu.cpp
+@@ -22,6 +22,9 @@
+ #include <stddef.h>
+ 
+ #include "cpu.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "debug.h"
+ #include "mapper.h"
+ #include "paging.h"
+@@ -1198,6 +1201,9 @@ void CPU_Exception(Bitu which,Bitu error ) {
+ 
+ uint8_t lastint;
+ void CPU_Interrupt(Bitu num,Bitu type,uint32_t oldeip) {
++#if C_DEBUG
++    AUTOCAP_RecordEvent("interrupt_entry_requested", uint32_t(num));
++#endif
+     if (num == EXCEPTION_DB && (type&CPU_INT_EXCEPTION) == 0) {
+       CPU_DebugException(0,oldeip); // DR6 bits need updating
+       return;
+@@ -1507,6 +1513,9 @@ do_interrupt:
+  *      Make sure this code emulates that bug. Some buggy games might rely on that. */
+ 
+ void CPU_IRET(bool use32,uint32_t oldeip) {
++#if C_DEBUG
++    AUTOCAP_RecordEvent("iret_requested", use32 ? 32u : 16u);
++#endif
+ 	uint32_t orig_esp = reg_esp;
+ 
+ 	/* x86 CPUs consider IRET the completion of an NMI, no matter where it happens */
+diff --git a/src/debug/Makefile.am b/src/debug/Makefile.am
+index 9832ff825..9c4f40354 100644
+--- a/src/debug/Makefile.am
++++ b/src/debug/Makefile.am
+@@ -1,4 +1,4 @@
+ AM_CPPFLAGS = -I$(top_srcdir)/include
+ 
+ noinst_LIBRARIES = libdebug.a
+-libdebug_a_SOURCES = debug.cpp debug_gui.cpp debug_disasm.cpp debug_inc.h disasm_tables.h debug_win32.cpp debug_mcp.cpp debug_mcp.h
++libdebug_a_SOURCES = debug.cpp debug_gui.cpp debug_disasm.cpp debug_inc.h disasm_tables.h debug_win32.cpp debug_mcp.cpp debug_mcp.h autocapture.cpp
+diff --git a/src/debug/autocapture.cpp b/src/debug/autocapture.cpp
+new file mode 100644
+index 000000000..b9ca6c1cc
+--- /dev/null
++++ b/src/debug/autocapture.cpp
+@@ -0,0 +1,1985 @@
++#include "dosbox.h"
++
++#if C_DEBUG
++
++#include "autocapture.h"
++
++#include <cerrno>
++#include <algorithm>
++#include <cctype>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <sstream>
++#include <vector>
++#include <deque>
++#include <cstring>
++
++#ifdef WIN32
++#include <direct.h>
++#include <sys/stat.h>
++#include <windows.h>
++#else
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++#include "agent/agent_protocol.h"
++#include "cpu.h"
++#include "cross.h"
++#include "debug.h"
++#include "dos_inc.h"
++#include "hardware.h"
++#include "logging.h"
++#include "pic.h"
++#include "regs.h"
++#include "render.h"
++#include "shell.h"
++#include "vga.h"
++#include "fpu.h"
++#include "../cpu/lazyflags.h"
++
++extern bool dos_kernel_disabled;
++extern std::string RunningProgram;
++extern bool CPU_CycleAutoAdjust;
++extern cpu_cycles_count_t CPU_CycleMax;
++bool systemmessagebox(char const* title, char const* message, char const* dialog_type,
++		char const* icon_type, int default_button);
++void AUTOCAP_RefreshMenuItems();
++
++namespace {
++
++using dosbox_agent::JsonType;
++using dosbox_agent::JsonValue;
++
++struct MemoryRegion {
++	std::string name;
++	uint16_t segment = 0;
++	uint32_t offset = 0;
++	uint32_t length = 0;
++	uint64_t every_n_captures = 1;
++};
++
++struct AssetConfiguration {
++	bool enabled = false;
++	uint64_t every_n_captures = 1;
++};
++
++struct ExecutionAddress {
++	uint16_t selector = 0;
++	uint32_t offset = 0;
++    uint64_t occurrence = 0; // 0 = every occurrence; numbered from attachment.
++    uint64_t seen = 0;
++    bool stop_after_capture = false;
++    bool has_previous_offset = false;
++    uint32_t previous_offset = 0;
++    // Paired observation of a 32-bit near CALL/RET with no argument cleanup.
++    bool pair_source = false;
++    bool pair_return = false;
++};
++
++struct InvocationPair {
++    bool active = false;
++    bool source_captured = false;
++    uint16_t cs = 0, ss = 0;
++    uint32_t cs_base = 0, ss_base = 0, caller_esp = 0, source_esp = 0;
++    uint64_t source_boundary = 0, source_capture = 0;
++};
++InvocationPair invocation_pair;
++bool previous_stack_big = false;
++uint16_t previous_boundary_ss = 0;
++uint32_t previous_boundary_ss_base = 0, previous_boundary_esp = 0;
++
++
++struct Configuration {
++	uint64_t version = 1;
++	std::string output_directory;
++	uint64_t interval_us = 1000000;
++	uint64_t initial_delay_us = 1000000;
++	bool screenshot = true;
++	bool registers = true;
++	uint64_t screenshot_every_n_captures = 1;
++	uint64_t registers_every_n_captures = 1;
++	AssetConfiguration machine_state;
++	AssetConfiguration vga_state;
++	AssetConfiguration framebuffer;
++    AssetConfiguration device_state;
++    AssetConfiguration x87_state;
++    AssetConfiguration render_surface;
++    bool reference_enabled = false;
++    bool trace_instructions = false;
++    bool start_at_first_address = false;
++    uint64_t max_events = 100000;
++    uint64_t expected_cycles = 0;
++	bool vga_include_palette = true;
++	bool vga_include_registers = true;
++	std::vector<MemoryRegion> memory;
++	bool events_enabled = false;
++	bool event_video_mode_change = false;
++	bool event_process_exit = false;
++	std::vector<ExecutionAddress> execution_addresses;
++	bool stop_on_error = false;
++	JsonValue effective;
++};
++
++enum class State { Disabled, Armed, Running, Capturing };
++
++Configuration config;
++State state = State::Disabled;
++std::string config_path;
++std::string session_path;
++std::string process_name;
++uint16_t tracked_psp = 0;
++uint64_t session_start_us = 0;
++uint64_t process_start_us = 0;
++uint64_t next_periodic_us = 0;
++uint64_t capture_sequence = 0;
++uint64_t completed_captures = 0;
++bool manual_pending = false;
++bool periodic_pending = false;
++uint64_t pending_scheduled_us = 0;
++uint64_t pending_missed_periods = 0;
++std::string stop_reason;
++std::string session_created_host_time;
++VGAModes attached_video_mode = M_ERROR;
++bool video_mode_initialized = false;
++bool execution_address_latched = false;
++uint64_t instruction_boundary_count = 0;
++uint64_t event_sequence = 0;
++uint64_t dropped_events = 0;
++uint64_t trace_interval_start = 0;
++std::vector<std::string> reference_events;
++std::deque<std::string> boundary_tail;
++bool reference_recording = false;
++bool previous_boundary_valid = false;
++uint16_t previous_boundary_cs = 0;
++uint32_t previous_boundary_eip = 0;
++bool at_instruction_boundary = false;
++uint64_t selected_occurrence = 0;
++bool cpu_settings_override = false;
++bool cpu_trace_incomplete = false;
++CPU_Decoder* acknowledged_decoder = nullptr;
++bool acknowledged_auto_cycles = false;
++unsigned char acknowledged_auto_mode = 0;
++cpu_cycles_count_t acknowledged_cycles = 0;
++
++bool CheckReferenceCPUSettings(const Configuration& requested)
++{
++    const bool normal = cpudecoder == CPU_Core_Normal_Run && !(CPU_AutoDetermineMode & CPU_AUTODETERMINE_CORE);
++    const bool fixed = !CPU_CycleAutoAdjust && !(CPU_AutoDetermineMode & CPU_AUTODETERMINE_CYCLES) && CPU_CycleMax > 0;
++    const bool count_matches = !requested.expected_cycles ||
++        (CPU_CycleMax > 0 && uint64_t(CPU_CycleMax) == requested.expected_cycles);
++    if (!normal || !fixed || !count_matches) {
++        std::ostringstream message;
++        message << "Expected: core=normal, cycles=fixed";
++        if (requested.expected_cycles) message << ' ' << requested.expected_cycles;
++        message << "\nActual core: " << (cpudecoder == CPU_Core_Normal_Run ? "normal" : "other (not normal)")
++            << ((CPU_AutoDetermineMode & CPU_AUTODETERMINE_CORE) ? " (automatic core switching enabled)" : "")
++            << "\nActual cycles: " << (CPU_CycleAutoAdjust ? "auto/max " : "fixed ") << CPU_CycleMax
++            << ((CPU_AutoDetermineMode & CPU_AUTODETERMINE_CYCLES) ? " (automatic cycle switching enabled)" : "")
++            << "\n\nIgnoring this warning risks incomplete or unreliable captures."
++            << " Instruction tracing and paired address triggers require the normal core."
++            << "\n\nYes: Ignore and continue capturing.\nNo: Cancel capture.";
++        if (!systemmessagebox("Automatic capture: CPU settings warning", message.str().c_str(), "yesno", "warning", 0))
++            return false;
++        cpu_settings_override = true;
++        cpu_trace_incomplete = true;
++    }
++    acknowledged_decoder = cpudecoder;
++    acknowledged_auto_cycles = CPU_CycleAutoAdjust;
++    acknowledged_auto_mode = CPU_AutoDetermineMode;
++    acknowledged_cycles = CPU_CycleMax;
++    return true;
++}
++
++
++std::string Join(const std::string& left, const std::string& right)
++{
++	if (left.empty()) return right;
++	const char tail = left[left.size() - 1];
++	if (tail == '/' || tail == '\\') return left + right;
++#ifdef WIN32
++	return left + "\\" + right;
++#else
++	return left + "/" + right;
++#endif
++}
++
++bool IsDirectory(const std::string& path)
++{
++	struct stat info;
++	return stat(path.c_str(), &info) == 0 && (info.st_mode & S_IFDIR) != 0;
++}
++
++bool MakeDirectory(const std::string& path)
++{
++	if (path.empty() || IsDirectory(path)) return true;
++#ifdef WIN32
++	if (_mkdir(path.c_str()) == 0) return true;
++#else
++	if (mkdir(path.c_str(), 0700) == 0) return true;
++#endif
++	return errno == EEXIST && IsDirectory(path);
++}
++
++bool MakeDirectories(const std::string& path)
++{
++	if (path.empty()) return false;
++	std::string current;
++	std::string::size_type index = 0;
++#ifdef WIN32
++	if (path.size() > 2 && path[1] == ':') {
++		current = path.substr(0, 2);
++		index = 2;
++	}
++#endif
++	if (path[0] == '/' || path[0] == '\\') {
++		current.assign(1, path[0]);
++		index = 1;
++	}
++	while (index < path.size()) {
++		const std::string::size_type end = path.find_first_of("/\\", index);
++		const std::string part = path.substr(index, end == std::string::npos ? end : end - index);
++		if (!part.empty()) {
++			current = current.empty() ? part : Join(current, part);
++			if (!MakeDirectory(current)) return false;
++		}
++		if (end == std::string::npos) break;
++		index = end + 1;
++	}
++	return IsDirectory(path);
++}
++
++bool WriteText(const std::string& path, const std::string& text, std::string* error)
++{
++	FILE* file = fopen(path.c_str(), "wb");
++	if (!file) {
++		if (error) *error = "Unable to open " + path;
++		return false;
++	}
++	const size_t written = fwrite(text.data(), 1, text.size(), file);
++	const bool flushed = fflush(file) == 0;
++	const bool closed = fclose(file) == 0;
++	const bool ok = written == text.size() && flushed && closed;
++	if (!ok && error) *error = "Unable to write " + path;
++	return ok;
++}
++
++bool WriteNewText(const std::string& path, const std::string& contents, bool* exists)
++{
++	*exists = false;
++#ifdef WIN32
++	HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW,
++	                          FILE_ATTRIBUTE_NORMAL, NULL);
++	if (file == INVALID_HANDLE_VALUE) {
++		const DWORD reason = GetLastError();
++		*exists = reason == ERROR_FILE_EXISTS || reason == ERROR_ALREADY_EXISTS;
++		return false;
++	}
++	DWORD written = 0;
++	const bool ok = WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()),
++	                          &written, NULL) != 0 && written == contents.size() &&
++	                FlushFileBuffers(file) != 0;
++	const bool closed = CloseHandle(file) != 0;
++	if (!ok || !closed) DeleteFileA(path.c_str());
++	return ok && closed;
++#else
++	const int descriptor = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
++	if (descriptor < 0) {
++		*exists = errno == EEXIST;
++		return false;
++	}
++	FILE* file = fdopen(descriptor, "wb");
++	if (!file) {
++		close(descriptor);
++		remove(path.c_str());
++		return false;
++	}
++	const bool written = fwrite(contents.data(), 1, contents.size(), file) == contents.size();
++	const bool flushed = fflush(file) == 0;
++	const bool closed = fclose(file) == 0;
++	if (!written || !flushed || !closed) remove(path.c_str());
++	return written && flushed && closed;
++#endif
++}
++
++bool WriteAtomic(const std::string& path, const std::string& text, std::string* error)
++{
++	const std::string temporary = path + ".tmp";
++	if (!WriteText(temporary, text, error)) return false;
++#ifdef WIN32
++	const bool renamed = MoveFileExA(temporary.c_str(), path.c_str(),
++	                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
++#else
++	const bool renamed = rename(temporary.c_str(), path.c_str()) == 0;
++#endif
++	if (!renamed) {
++		if (error) *error = "Unable to finalize " + path;
++		return false;
++	}
++	return true;
++}
++
++std::string Escape(const std::string& value)
++{
++	JsonValue string = JsonValue::String(value);
++	return dosbox_agent::AGENT_SerializeJson(string);
++}
++
++bool ReadFile(const std::string& path, std::string* contents, std::string* error)
++{
++	std::ifstream file(path.c_str(), std::ios::binary);
++	if (!file) {
++		if (error) *error = "Unable to read configuration: " + path;
++		return false;
++	}
++	std::ostringstream data;
++	data << file.rdbuf();
++	if (!file.good() && !file.eof()) {
++		if (error) *error = "Failed while reading configuration: " + path;
++		return false;
++	}
++	*contents = data.str();
++	return true;
++}
++
++bool GetObject(const JsonValue& value, const char* name, const JsonValue** result,
++		       const std::string& path, std::string* error)
++{
++	*result = value.Find(name);
++	if (!*result || (*result)->type != JsonType::Object) {
++		if (error) *error = path + "." + name + " must be an object";
++		return false;
++	}
++	return true;
++}
++
++bool GetString(const JsonValue& value, const char* name, std::string* result,
++		       const std::string& path, std::string* error)
++{
++	const JsonValue* field = value.Find(name);
++	if (!field || field->type != JsonType::String) {
++		if (error) *error = path + "." + name + " must be a string";
++		return false;
++	}
++	*result = field->text;
++	return true;
++}
++
++bool GetBool(const JsonValue& value, const char* name, const bool fallback,
++		     bool* result, const std::string& path, std::string* error)
++{
++	const JsonValue* field = value.Find(name);
++	if (!field) { *result = fallback; return true; }
++	if (field->type != JsonType::Bool) {
++		if (error) *error = path + "." + name + " must be a boolean";
++		return false;
++	}
++	*result = field->boolean;
++	return true;
++}
++
++bool GetUnsigned(const JsonValue& value, const char* name, const uint64_t fallback,
++			 bool required, uint64_t* result, const std::string& path, std::string* error)
++{
++	const JsonValue* field = value.Find(name);
++	if (!field) {
++		if (!required) { *result = fallback; return true; }
++		if (error) *error = path + "." + name + " is required";
++		return false;
++	}
++	if (field->type != JsonType::Number || field->text.empty() || field->text[0] == '-') {
++		if (error) *error = path + "." + name + " must be a non-negative integer";
++		return false;
++	}
++	char* end = NULL;
++	errno = 0;
++	const unsigned long long number = strtoull(field->text.c_str(), &end, 10);
++	if (errno || end == field->text.c_str() || *end || number > (std::numeric_limits<uint64_t>::max)()) {
++		if (error) *error = path + "." + name + " is outside the supported integer range";
++		return false;
++	}
++	*result = static_cast<uint64_t>(number);
++	return true;
++}
++
++bool ParseFormatHex(const JsonValue& value, const char* name, const uint64_t maximum,
++		  uint64_t* result, const std::string& path, std::string* error)
++{
++	const JsonValue* field = value.Find(name);
++	if (!field || field->type != JsonType::String || field->text.empty()) {
++		if (error) *error = path + "." + name + " must be a non-empty hexadecimal string";
++		return false;
++	}
++	const std::string& text = field->text;
++	if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
++		if (error) *error = path + "." + name + " must not include a 0x prefix";
++		return false;
++	}
++	for (std::string::const_iterator it = text.begin(); it != text.end(); ++it) {
++		if (!std::isxdigit(static_cast<unsigned char>(*it))) {
++			if (error) *error = path + "." + name + " must contain hexadecimal digits only";
++			return false;
++		}
++	}
++	char* end = NULL;
++	errno = 0;
++	const unsigned long long number = strtoull(text.c_str(), &end, 16);
++	if (errno || !end || *end || number > maximum) {
++		if (error) *error = path + "." + name + " is outside the supported range";
++		return false;
++	}
++	*result = static_cast<uint64_t>(number);
++	return true;
++}
++
++bool SafeName(const std::string& name)
++{
++	if (name.empty() || name == "." || name == "..") return false;
++	for (std::string::const_iterator it = name.begin(); it != name.end(); ++it) {
++		const unsigned char c = static_cast<unsigned char>(*it);
++		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++	      (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
++	}
++	return true;
++}
++
++bool ParseCadence(const JsonValue& value, const std::string& path, uint64_t* cadence,
++			  std::string* error)
++{
++	uint64_t parsed = 1;
++	if (!GetUnsigned(value, "every_n_captures", 1, false, &parsed, path, error)) return false;
++	if (parsed == 0) {
++		if (error) *error = path + ".every_n_captures must be at least 1";
++		return false;
++	}
++	*cadence = parsed;
++	return true;
++}
++
++bool ParseAsset(const JsonValue& object, const char* name, AssetConfiguration* asset,
++			const std::string& path, std::string* error)
++{
++	const JsonValue* value = object.Find(name);
++	if (!value) return true;
++	if (value->type != JsonType::Object ||
++	    !GetBool(*value, "enabled", false, &asset->enabled, path + "." + name, error) ||
++	    !ParseCadence(*value, path + "." + name, &asset->every_n_captures, error)) return false;
++	return true;
++}
++
++bool IsDue(const uint64_t capture, const uint64_t cadence)
++{
++	return cadence != 0 && capture % cadence == 0;
++}
++
++bool ParseConfiguration(const std::string& path, Configuration* parsed, std::string* error)
++{
++	std::string text;
++	if (!ReadFile(path, &text, error)) return false;
++	JsonValue root;
++	if (!dosbox_agent::AGENT_ParseJson(text, &root, error)) return false;
++	if (root.type != JsonType::Object) {
++		if (error) *error = "configuration root must be an object";
++		return false;
++	}
++	uint64_t version = 0;
++	if (!GetUnsigned(root, "version", 0, true, &version, "configuration", error) ||
++	    (version != 1 && version != 2)) {
++		if (error && error->empty()) *error = "configuration.version must equal 1 or 2";
++		return false;
++	}
++	Configuration result;
++	result.version = version;
++	const JsonValue* output = NULL;
++	if (version == 2 && !root.Find("output")) {
++		if (!GetString(root, "output_directory", &result.output_directory, "configuration", error)) return false;
++	} else if (!GetObject(root, "output", &output, "configuration", error) ||
++	           !GetString(*output, "directory", &result.output_directory, "configuration.output", error)) return false;
++	if (result.output_directory.empty()) {
++		if (error) *error = "configuration.output.directory must not be empty";
++		return false;
++	}
++	const JsonValue* trigger = NULL;
++	if (!GetObject(root, "trigger", &trigger, "configuration", error)) return false;
++	std::string trigger_type;
++	if (!GetString(*trigger, "type", &trigger_type, "configuration.trigger", error)) return false;
++	if (trigger_type != "emulated_time") {
++		if (error) *error = "configuration.trigger.type must be emulated_time";
++		return false;
++	}
++	uint64_t interval_ms = 0, delay_ms = 1000;
++	if (!GetUnsigned(*trigger, "interval_ms", 0, true, &interval_ms, "configuration.trigger", error) ||
++	    !GetUnsigned(*trigger, "initial_delay_ms", 1000, false, &delay_ms, "configuration.trigger", error)) return false;
++	if (interval_ms == 0 || interval_ms > (std::numeric_limits<uint64_t>::max)() / 1000 ||
++	    delay_ms > (std::numeric_limits<uint64_t>::max)() / 1000) {
++		if (error) *error = "trigger intervals must be positive and fit in microseconds";
++		return false;
++	}
++	result.interval_us = interval_ms * 1000;
++	result.initial_delay_us = delay_ms * 1000;
++	const JsonValue* process = root.Find("process");
++	if (process) {
++		if (process->type != JsonType::Object) {
++			if (error) *error = "configuration.process must be an object";
++			return false;
++		}
++		std::string mode;
++		if (process->Find("mode") && (!GetString(*process, "mode", &mode, "configuration.process", error) || mode != "current_or_next")) {
++			if (error && error->empty()) *error = "configuration.process.mode must be current_or_next";
++			return false;
++		}
++		std::string on_exit;
++		if (process->Find("on_exit") && (!GetString(*process, "on_exit", &on_exit, "configuration.process", error) || on_exit != "stop")) {
++			if (error && error->empty()) *error = "configuration.process.on_exit must be stop";
++			return false;
++		}
++	}
++	const char* capture_name = version == 1 ? "capture" : "assets";
++	const JsonValue* capture = root.Find(capture_name);
++	if (!capture && version == 2) { // Accept the v1 nesting in a v2 file for painless migration.
++		capture_name = "capture";
++		capture = root.Find(capture_name);
++	}
++	if (!capture || capture->type != JsonType::Object) {
++		if (error) *error = std::string("configuration.") + capture_name + " must be an object";
++		return false;
++	}
++	const std::string capture_path = std::string("configuration.") + capture_name;
++	const JsonValue* screenshot = capture->Find("screenshot");
++	if (screenshot) {
++		if (screenshot->type != JsonType::Object || !GetBool(*screenshot, "enabled", true, &result.screenshot, capture_path + ".screenshot", error) ||
++		    !ParseCadence(*screenshot, capture_path + ".screenshot", &result.screenshot_every_n_captures, error)) return false;
++		std::string format;
++		if (screenshot->Find("format") && (!GetString(*screenshot, "format", &format, capture_path + ".screenshot", error) || format != "png")) {
++			if (error && error->empty()) *error = "configuration.capture.screenshot.format must be png";
++			return false;
++		}
++	}
++	const JsonValue* registers = capture->Find("registers");
++	if (registers) {
++		if (registers->type != JsonType::Object || !GetBool(*registers, "enabled", true, &result.registers, capture_path + ".registers", error) ||
++		    !ParseCadence(*registers, capture_path + ".registers", &result.registers_every_n_captures, error)) return false;
++		std::string format;
++		if (registers->Find("format") && (!GetString(*registers, "format", &format, capture_path + ".registers", error) || format != "json")) {
++			if (error && error->empty()) *error = "configuration.capture.registers.format must be json";
++			return false;
++		}
++	}
++	if (version == 2) {
++		if (!ParseAsset(*capture, "machine_state", &result.machine_state, capture_path, error) ||
++		    !ParseAsset(*capture, "vga_state", &result.vga_state, capture_path, error) ||
++		    !ParseAsset(*capture, "framebuffer", &result.framebuffer, capture_path, error) ||
++            !ParseAsset(*capture, "device_state", &result.device_state, capture_path, error) ||
++            !ParseAsset(*capture, "x87_state", &result.x87_state, capture_path, error) ||
++            !ParseAsset(*capture, "render_surface", &result.render_surface, capture_path, error)) return false;
++        const JsonValue* reference = root.Find("reference");
++        if (reference) {
++            if (reference->type != JsonType::Object ||
++                !GetBool(*reference, "enabled", false, &result.reference_enabled, "configuration.reference", error) ||
++                !GetBool(*reference, "trace_instructions", false, &result.trace_instructions, "configuration.reference", error) ||
++                !GetBool(*reference, "start_at_first_address", false, &result.start_at_first_address, "configuration.reference", error) ||
++                !GetUnsigned(*reference, "expected_cycles", 0, false, &result.expected_cycles, "configuration.reference", error) ||
++                !GetUnsigned(*reference, "max_events", 100000, false, &result.max_events, "configuration.reference", error)) return false;
++            if (result.expected_cycles > uint64_t((std::numeric_limits<cpu_cycles_count_t>::max)())) {
++                if (error) *error = "configuration.reference.expected_cycles exceeds the supported cycle count";
++                return false;
++            }
++            if (result.max_events == 0 || result.max_events > 1000000) {
++                if (error) *error = "configuration.reference.max_events must be 1..1000000";
++                return false;
++            }
++        }
++		const JsonValue* vga_state = capture->Find("vga_state");
++		if (vga_state && (!GetBool(*vga_state, "include_palette", true, &result.vga_include_palette,
++		                         capture_path + ".vga_state", error) ||
++		                  !GetBool(*vga_state, "include_registers", true, &result.vga_include_registers,
++		                         capture_path + ".vga_state", error))) return false;
++		const JsonValue* framebuffer = capture->Find("framebuffer");
++		if (framebuffer && framebuffer->Find("mode")) {
++			std::string mode;
++			if (!GetString(*framebuffer, "mode", &mode, capture_path + ".framebuffer", error) || mode != "active") {
++				if (error && error->empty()) *error = capture_path + ".framebuffer.mode must be active";
++				return false;
++			}
++		}
++	}
++	const JsonValue* memory = version == 2 ? root.Find("memory") : capture->Find("memory");
++	if (memory) {
++		if (memory->type != JsonType::Array) {
++			if (error) *error = "configuration.capture.memory must be an array";
++			return false;
++		}
++		for (size_t i = 0; i < memory->array.size(); ++i) {
++			const JsonValue& item = memory->array[i];
++			const std::string path_prefix = std::string(version == 2 ? "configuration.memory[" : "configuration.capture.memory[") + std::to_string(i) + "]";
++			if (item.type != JsonType::Object) {
++				if (error) *error = path_prefix + " must be an object";
++				return false;
++			}
++			MemoryRegion region;
++			uint64_t segment = 0, offset = 0, length = 0;
++			if (!GetString(item, "name", &region.name, path_prefix, error) ||
++			    !SafeName(region.name) ||
++			    !ParseFormatHex(item, "segment", 0xffff, &segment, path_prefix, error) ||
++			    !ParseFormatHex(item, "offset", 0xffffffffULL, &offset, path_prefix, error) ||
++			    !ParseFormatHex(item, "length", 0xffffffffULL, &length, path_prefix, error)) {
++				if (error && error->empty()) *error = path_prefix + ".name must use letters, digits, underscore, or hyphen";
++				return false;
++			}
++			if (length == 0 || length > (std::numeric_limits<uint32_t>::max)()) {
++				if (error) *error = path_prefix + ".length must be between 1 and FFFFFFFF";
++				return false;
++			}
++			if (offset + length > (std::numeric_limits<uint32_t>::max)() + 1ULL) {
++				if (error) *error = path_prefix + ".offset + length exceeds the supported linear address range";
++				return false;
++			}
++			std::string format;
++			if (item.Find("format") && (!GetString(item, "format", &format, path_prefix, error) || format != "binary")) {
++				if (error && error->empty()) *error = path_prefix + ".format must be binary";
++				return false;
++			}
++			for (std::vector<MemoryRegion>::const_iterator previous = result.memory.begin(); previous != result.memory.end(); ++previous) {
++				std::string previous_name = previous->name;
++				std::string region_name = region.name;
++				std::transform(previous_name.begin(), previous_name.end(), previous_name.begin(), ::tolower);
++				std::transform(region_name.begin(), region_name.end(), region_name.begin(), ::tolower);
++				if (previous_name == region_name) {
++					if (error) *error = "duplicate memory region name: " + region.name;
++					return false;
++				}
++			}
++			region.segment = static_cast<uint16_t>(segment);
++			region.offset = static_cast<uint32_t>(offset);
++			region.length = static_cast<uint32_t>(length);
++			if (!ParseCadence(item, path_prefix, &region.every_n_captures, error)) return false;
++			result.memory.push_back(region);
++		}
++	}
++	if (!result.screenshot && !result.registers && !result.machine_state.enabled &&
++	    !result.vga_state.enabled && !result.framebuffer.enabled && !result.device_state.enabled &&
++        !result.x87_state.enabled && !result.render_surface.enabled && result.memory.empty()) {
++		if (error) *error = "at least one capture asset must be enabled";
++		return false;
++	}
++	const JsonValue* handling = root.Find("error_handling");
++	if (handling) {
++		if (handling->type != JsonType::Object) {
++			if (error) *error = "configuration.error_handling must be an object";
++			return false;
++		}
++		std::string policy;
++		if (handling->Find("on_capture_error") && !GetString(*handling, "on_capture_error", &policy, "configuration.error_handling", error)) return false;
++		if (!policy.empty() && policy != "continue" && policy != "stop") {
++			if (error) *error = "configuration.error_handling.on_capture_error must be continue or stop";
++			return false;
++		}
++		result.stop_on_error = policy == "stop";
++	}
++	if (version == 2) {
++		const JsonValue* policy = root.Find("on_capture_error");
++		if (policy) {
++			if (policy->type != JsonType::String || (policy->text != "continue" && policy->text != "stop")) {
++				if (error) *error = "configuration.on_capture_error must be continue or stop";
++				return false;
++			}
++			result.stop_on_error = policy->text == "stop";
++		}
++		const JsonValue* events = root.Find("events");
++		if (events) {
++			if (events->type != JsonType::Object ||
++			    !GetBool(*events, "enabled", false, &result.events_enabled, "configuration.events", error) ||
++			    !GetBool(*events, "video_mode_change", false, &result.event_video_mode_change, "configuration.events", error) ||
++			    !GetBool(*events, "process_exit", false, &result.event_process_exit, "configuration.events", error)) return false;
++			const JsonValue* addresses = events->Find("execution_addresses");
++			if (addresses) {
++				if (addresses->type != JsonType::Array) {
++					if (error) *error = "configuration.events.execution_addresses must be an array";
++					return false;
++				}
++				for (size_t i = 0; i < addresses->array.size(); ++i) {
++					const JsonValue& address = addresses->array[i];
++					const std::string address_path = "configuration.events.execution_addresses[" + std::to_string(i) + "]";
++					uint64_t selector = 0, offset = 0;
++					if (address.type != JsonType::Object ||
++					    !ParseFormatHex(address, "selector", 0xffff, &selector, address_path, error) ||
++					    !ParseFormatHex(address, "offset", 0xffffffffULL, &offset, address_path, error)) return false;
++					ExecutionAddress configured;
++					configured.selector = static_cast<uint16_t>(selector);
++					configured.offset = static_cast<uint32_t>(offset);
++                    if (!GetUnsigned(address, "occurrence", 0, false, &configured.occurrence, address_path, error)) return false;
++                    if (!GetBool(address, "stop_after_capture", false, &configured.stop_after_capture, address_path, error)) return false;
++                    if (!GetBool(address, "pair_source", false, &configured.pair_source, address_path, error) ||
++                        !GetBool(address, "pair_return", false, &configured.pair_return, address_path, error)) return false;
++                    if (address.Find("previous_offset")) {
++                        uint64_t previous = 0;
++                        if (!ParseFormatHex(address, "previous_offset", 0xffffffffULL, &previous, address_path, error)) return false;
++                        configured.has_previous_offset = true;
++                        configured.previous_offset = uint32_t(previous);
++                    }
++					result.execution_addresses.push_back(configured);
++				}
++			}
++		}
++    }
++	result.effective = root;
++    if (!result.reference_enabled) {
++        for (const auto& address : result.execution_addresses) {
++            if (address.occurrence || address.stop_after_capture || address.has_previous_offset || address.pair_source || address.pair_return) {
++                if (error) *error = "Occurrence/stop_after_capture require reference.enabled=true";
++                return false;
++            }
++        }
++    }
++    unsigned sources = 0, returns = 0;
++    for (const auto& address : result.execution_addresses) {
++        sources += address.pair_source;
++        returns += address.pair_return;
++        if ((address.pair_source && (!address.has_previous_offset || !address.occurrence || address.pair_return || address.stop_after_capture)) ||
++            (address.pair_return && (!address.stop_after_capture || address.occurrence != 1))) {
++            if (error) *error = "pair_source requires previous_offset and positive occurrence; pair_return requires occurrence=1 and stop_after_capture";
++            return false;
++        }
++    }
++    if ((sources || returns) && (sources != 1 || returns != 1 || !result.reference_enabled || !result.events_enabled)) {
++        if (error) *error = "Pairing requires exactly one source and one return with reference/events enabled";
++        return false;
++    }
++    if (sources) {
++        const ExecutionAddress* source = nullptr;
++        const ExecutionAddress* endpoint = nullptr;
++        for (const auto& address : result.execution_addresses) {
++            if (address.pair_source) source = &address;
++            if (address.pair_return) endpoint = &address;
++        }
++        if (source->selector != endpoint->selector || source->offset == endpoint->offset) {
++            if (error) *error = "Paired near-call source/return require the same CS and distinct offsets";
++            return false;
++        }
++    }
++    if (result.start_at_first_address && (!result.reference_enabled || !result.events_enabled || result.execution_addresses.empty())) {
++        if (error) *error = "start_at_first_address requires reference.enabled and execution address events";
++        return false;
++    }
++	*parsed = result;
++	if (error) error->clear();
++	return true;
++}
++
++uint64_t GuestTimeUs()
++{
++	const double ticks = PIC_FullIndex();
++	if (ticks <= 0.0) return 0;
++	const double micros = ticks * 1000.0;
++	if (micros >= static_cast<double>((std::numeric_limits<uint64_t>::max)())) return (std::numeric_limits<uint64_t>::max)();
++	return static_cast<uint64_t>(micros + 0.5);
++}
++
++std::string HostTime()
++{
++	const std::time_t now = std::time(NULL);
++	struct tm local;
++#ifdef WIN32
++	localtime_s(&local, &now);
++#else
++	localtime_r(&now, &local);
++#endif
++	char buffer[32];
++	strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M-%S", &local);
++	return buffer;
++}
++
++std::string IsoHostTime()
++{
++	const std::time_t now = std::time(NULL);
++	struct tm local;
++#ifdef WIN32
++	localtime_s(&local, &now);
++#else
++	localtime_r(&now, &local);
++#endif
++	char buffer[40];
++	strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &local);
++	return buffer;
++}
++
++std::string FormatHex(const uint64_t value, const unsigned int width)
++{
++	std::ostringstream out;
++	out << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value;
++	return out.str();
++}
++
++std::string SessionManifest(const char* status)
++{
++	std::ostringstream json;
++	json << "{\n  \"format_version\": " << config.version << ",\n"
++	     << "  \"created_host_time\": " << Escape(session_created_host_time) << ",\n"
++	     << "  \"dosbox_x_version\": " << Escape(VERSION) << ",\n"
++	     << "  \"status\": " << Escape(status) << ",\n"
++	     << "  \"stop_reason\": " << Escape(stop_reason) << ",\n"
++	     << "  \"program\": {\"executable\": " << Escape(process_name)
++	     << ", \"psp\": " << Escape(tracked_psp ? FormatHex(tracked_psp, 4) : std::string()) << "},\n"
++	     << "  \"process_start_us\": " << process_start_us << ",\n"
++	     << "  \"captures\": " << completed_captures << ",\n";
++	if (config.version == 2) {
++		json << "  \"capabilities\": {\"machine_state\": true, \"vga_state\": true, \"framebuffer\": true, \"device_state\": true, \"x87_state\": true, \"render_surface\": true, \"normal_core_instruction_boundary\": true, \"instruction_counter\": " << (config.reference_enabled ? "true" : "false") << "},\n"
++		     << "  \"asset_cadence\": {\"registers\": " << config.registers_every_n_captures
++		     << ", \"screenshot\": " << config.screenshot_every_n_captures
++		     << ", \"machine_state\": " << config.machine_state.every_n_captures
++		     << ", \"vga_state\": " << config.vga_state.every_n_captures
++		     << ", \"framebuffer\": " << config.framebuffer.every_n_captures
++             << ", \"device_state\": " << config.device_state.every_n_captures
++             << ", \"x87_state\": " << config.x87_state.every_n_captures
++             << ", \"render_surface\": " << config.render_surface.every_n_captures << "},\n"
++		     << "  \"events\": {\"enabled\": " << (config.events_enabled ? "true" : "false")
++		     << ", \"video_mode_change\": " << (config.event_video_mode_change ? "true" : "false")
++		     << ", \"process_exit\": " << (config.event_process_exit ? "true" : "false") << "},\n";
++	}
++    if (config.reference_enabled) {
++        json << "  \"reference\":{\"normal_boundaries\":" << instruction_boundary_count
++             << ",\"buffered_events\":" << reference_events.size() << ",\"dropped_events\":" << dropped_events
++             << ",\"cpu_settings_override\":" << (cpu_settings_override ? "true" : "false")
++             << ",\"cpu_trace_incomplete\":" << (cpu_trace_incomplete ? "true" : "false")
++             << ",\"expected_cycles\":" << config.expected_cycles
++             << ",\"start_at_first_address\":" << (config.start_at_first_address ? "true" : "false")
++             << ",\"trace_instructions\":" << (config.trace_instructions ? "true" : "false") << "},\n";
++    }
++	json << "  \"configuration\": " << dosbox_agent::AGENT_SerializeJson(config.effective) << "\n}\n";
++	return json.str();
++}
++
++bool IsShellProcess()
++{
++	if (dos_kernel_disabled || !dos.psp()) return true;
++	const uint16_t psp = dos.psp();
++	const uint16_t shell = DOS_ShellGetPSP();
++	if (psp == shell) return true;
++	if (RunningProgram == "COMMAND" || RunningProgram == "4DOS" || RunningProgram == "DOSBOX-X" || RunningProgram == "LOADLIN") return true;
++	return false;
++}
++
++bool CreateSessionDirectory(std::string* error)
++{
++	if (!MakeDirectories(config.output_directory)) {
++		if (error) *error = "Unable to create output directory: " + config.output_directory;
++		return false;
++	}
++	const std::string stamp = HostTime();
++	for (unsigned int suffix = 0; suffix < 1000; ++suffix) {
++		std::ostringstream name;
++		name << stamp;
++		if (suffix) name << "_" << std::setw(3) << std::setfill('0') << suffix;
++		const std::string candidate = Join(config.output_directory, name.str());
++		if (IsDirectory(candidate)) continue;
++		if (MakeDirectory(candidate)) {
++			session_path = candidate;
++			return true;
++		}
++	}
++	if (error) *error = "Unable to create a unique session directory under " + config.output_directory;
++	return false;
++}
++
++void Attach(const char* executable, const uint16_t psp)
++{
++	state = State::Running;
++	tracked_psp = psp;
++	process_name = executable ? executable : "unknown";
++	attached_video_mode = vga.mode;
++	video_mode_initialized = true;
++	execution_address_latched = false;
++	process_start_us = GuestTimeUs();
++	const uint64_t first_deadline_delta = config.initial_delay_us ? config.initial_delay_us : config.interval_us;
++	next_periodic_us = process_start_us > (std::numeric_limits<uint64_t>::max)() - first_deadline_delta
++			? (std::numeric_limits<uint64_t>::max)()
++			: process_start_us + first_deadline_delta;
++	LOG_MSG("AUTOCAP: Attached to %s PSP=%04X", process_name.c_str(), tracked_psp);
++	std::string error;
++	if (!WriteAtomic(Join(session_path, "session.json"), SessionManifest("running"), &error))
++		LOG_MSG("AUTOCAP: %s", error.c_str());
++	AUTOCAP_RefreshMenuItems();
++	if (config.initial_delay_us == 0) {
++		periodic_pending = true;
++		pending_scheduled_us = process_start_us;
++	}
++}
++
++bool WriteRegisters(const std::string& path, std::string* error)
++{
++	std::ostringstream json;
++	json << "{\n"
++	     << "  \"eax\": " << Escape(FormatHex(reg_eax, 8)) << ",\n"
++	     << "  \"ebx\": " << Escape(FormatHex(reg_ebx, 8)) << ",\n"
++	     << "  \"ecx\": " << Escape(FormatHex(reg_ecx, 8)) << ",\n"
++	     << "  \"edx\": " << Escape(FormatHex(reg_edx, 8)) << ",\n"
++	     << "  \"esi\": " << Escape(FormatHex(reg_esi, 8)) << ",\n"
++	     << "  \"edi\": " << Escape(FormatHex(reg_edi, 8)) << ",\n"
++	     << "  \"ebp\": " << Escape(FormatHex(reg_ebp, 8)) << ",\n"
++	     << "  \"esp\": " << Escape(FormatHex(reg_esp, 8)) << ",\n"
++	     << "  \"eip\": " << Escape(FormatHex(reg_eip, 8)) << ",\n"
++	     << "  \"eflags\": " << Escape(FormatHex(static_cast<uint32_t>(reg_flags), 8)) << ",\n"
++	     << "  \"cs\": " << Escape(FormatHex(SegValue(cs), 4)) << ",\n"
++	     << "  \"ds\": " << Escape(FormatHex(SegValue(ds), 4)) << ",\n"
++	     << "  \"es\": " << Escape(FormatHex(SegValue(es), 4)) << ",\n"
++	     << "  \"fs\": " << Escape(FormatHex(SegValue(fs), 4)) << ",\n"
++	     << "  \"gs\": " << Escape(FormatHex(SegValue(gs), 4)) << ",\n"
++	     << "  \"ss\": " << Escape(FormatHex(SegValue(ss), 4)) << ",\n"
++	     << "  \"flags\": {\"cf\": " << ((reg_flags & FLAG_CF) ? "true" : "false")
++	     << ", \"pf\": " << ((reg_flags & FLAG_PF) ? "true" : "false")
++	     << ", \"af\": " << ((reg_flags & FLAG_AF) ? "true" : "false")
++	     << ", \"zf\": " << ((reg_flags & FLAG_ZF) ? "true" : "false")
++	     << ", \"sf\": " << ((reg_flags & FLAG_SF) ? "true" : "false")
++	     << ", \"tf\": " << ((reg_flags & FLAG_TF) ? "true" : "false")
++	     << ", \"if\": " << ((reg_flags & FLAG_IF) ? "true" : "false")
++	     << ", \"df\": " << ((reg_flags & FLAG_DF) ? "true" : "false")
++	     << ", \"of\": " << ((reg_flags & FLAG_OF) ? "true" : "false") << "}\n}\n";
++	return WriteText(path, json.str(), error);
++}
++
++const char* CpuMode()
++{
++	if (!cpu.pmode) return "real";
++	return cpu.code.big ? "protected32" : "protected16";
++}
++
++void WriteSegmentState(std::ostringstream& json, const char* name, const SegNames seg)
++{
++	const uint16_t selector = SegValue(seg);
++	Descriptor descriptor;
++	const bool resolved = cpu.pmode && selector != 0 && cpu.gdt.GetDescriptor(selector, descriptor);
++	json << "    " << Escape(name) << ": {\"selector\": " << Escape(FormatHex(selector, 4))
++	     << ", \"base\": " << Escape(FormatHex(SegPhys(seg), 8));
++	if (!cpu.pmode) {
++		json << ", \"table\": null, \"descriptor_available\": false, \"limit\": "
++		     << Escape("0000FFFF") << "}";
++		return;
++	}
++	if (!resolved) {
++		json << ", \"table\": " << Escape((selector & 4) ? "ldt" : "gdt")
++		     << ", \"descriptor_index\": " << (selector >> 3u)
++		     << ", \"descriptor_available\": false, \"limit\": null}";
++		return;
++	}
++	json << ", \"table\": " << Escape((selector & 4) ? "ldt" : "gdt")
++	     << ", \"descriptor_index\": " << (selector >> 3u)
++	     << ", \"descriptor_available\": true"
++	     << ", \"limit\": " << Escape(FormatHex(descriptor.GetLimit(), 8))
++	     << ", \"access_type\": " << Escape(FormatHex(descriptor.Type(), 2))
++	     << ", \"dpl\": " << descriptor.DPL()
++	     << ", \"present\": " << (descriptor.saved.seg.p ? "true" : "false")
++	     << ", \"default_32bit\": " << (descriptor.Big() ? "true" : "false")
++	     << ", \"granularity\": " << (descriptor.saved.seg.g ? "true" : "false") << "}";
++}
++
++struct MachineCaptureState {
++	Bitu cr0 = 0;
++	bool pmode = false;
++	Bitu cpl = 0;
++	LinearPt gdtr_base = 0;
++	Bitu gdtr_limit = 0;
++	LinearPt idtr_base = 0;
++	Bitu idtr_limit = 0;
++	uint16_t selectors[6] = {};
++	PhysPt bases[6] = {};
++};
++
++MachineCaptureState ReadMachineCaptureState()
++{
++	MachineCaptureState snapshot;
++	snapshot.cr0 = cpu.cr0;
++	snapshot.pmode = cpu.pmode;
++	snapshot.cpl = cpu.cpl;
++	snapshot.gdtr_base = cpu.gdt.GetBase();
++	snapshot.gdtr_limit = cpu.gdt.GetLimit();
++	snapshot.idtr_base = cpu.idt.GetBase();
++	snapshot.idtr_limit = cpu.idt.GetLimit();
++	const SegNames segments[] = {cs, ds, es, ss, fs, gs};
++	for (size_t i = 0; i < sizeof(segments) / sizeof(segments[0]); ++i) {
++		snapshot.selectors[i] = SegValue(segments[i]);
++		snapshot.bases[i] = SegPhys(segments[i]);
++	}
++	return snapshot;
++}
++
++bool MachineCaptureStateMatches(const MachineCaptureState& before)
++{
++	if (cpu.cr0 != before.cr0 || cpu.pmode != before.pmode || cpu.cpl != before.cpl ||
++	    cpu.gdt.GetBase() != before.gdtr_base || cpu.gdt.GetLimit() != before.gdtr_limit ||
++	    cpu.idt.GetBase() != before.idtr_base || cpu.idt.GetLimit() != before.idtr_limit)
++		return false;
++	const SegNames segments[] = {cs, ds, es, ss, fs, gs};
++	for (size_t i = 0; i < sizeof(segments) / sizeof(segments[0]); ++i) {
++		if (SegValue(segments[i]) != before.selectors[i] || SegPhys(segments[i]) != before.bases[i])
++			return false;
++	}
++	return true;
++}
++
++bool WriteMachineState(const std::string& path, std::string* error)
++{
++	const MachineCaptureState before = ReadMachineCaptureState();
++	std::ostringstream json;
++	json << "{\n  \"cpu_mode\": " << Escape(CpuMode())
++	     << ",\n  \"cpl\": " << (cpu.pmode ? std::to_string(cpu.cpl) : "null")
++	     << ",\n  \"cr0\": " << Escape(FormatHex(cpu.cr0, 8))
++	     << ",\n  \"gdtr\": {\"base\": " << Escape(FormatHex(cpu.gdt.GetBase(), 8))
++	     << ", \"limit\": " << Escape(FormatHex(cpu.gdt.GetLimit(), 4)) << "}"
++	     << ",\n  \"idtr\": {\"base\": " << Escape(FormatHex(cpu.idt.GetBase(), 8))
++	     << ", \"limit\": " << Escape(FormatHex(cpu.idt.GetLimit(), 4)) << "}"
++	     << ",\n  \"segments\": {\n";
++	WriteSegmentState(json, "cs", cs); json << ",\n";
++	WriteSegmentState(json, "ds", ds); json << ",\n";
++	WriteSegmentState(json, "es", es); json << ",\n";
++	WriteSegmentState(json, "ss", ss); json << ",\n";
++	WriteSegmentState(json, "fs", fs); json << ",\n";
++	WriteSegmentState(json, "gs", gs); json << "\n  }\n}\n";
++	if (!MachineCaptureStateMatches(before)) {
++		if (error) *error = "CPU state changed while serializing machine state";
++		return false;
++	}
++	return WriteText(path, json.str(), error);
++}
++
++struct DacCaptureState {
++	uint8_t bits = 0;
++	uint8_t pel_mask = 0;
++	uint8_t pel_index = 0;
++	uint8_t component_state = 0;
++	uint8_t write_index = 0;
++	uint8_t read_index = 0;
++	RGBEntry palette[256] = {};
++};
++
++DacCaptureState ReadDacCaptureState()
++{
++	DacCaptureState snapshot;
++	snapshot.bits = vga.dac.bits;
++	snapshot.pel_mask = vga.dac.pel_mask;
++	snapshot.pel_index = vga.dac.pel_index;
++	snapshot.component_state = vga.dac.state;
++	snapshot.write_index = vga.dac.write_index;
++	snapshot.read_index = vga.dac.read_index;
++	std::memcpy(snapshot.palette, vga.dac.rgb, sizeof(snapshot.palette));
++	return snapshot;
++}
++
++bool DacCaptureStateMatches(const DacCaptureState& before)
++{
++	return vga.dac.bits == before.bits && vga.dac.pel_mask == before.pel_mask &&
++	       vga.dac.pel_index == before.pel_index && vga.dac.state == before.component_state &&
++	       vga.dac.write_index == before.write_index && vga.dac.read_index == before.read_index &&
++	       std::memcmp(vga.dac.rgb, before.palette, sizeof(before.palette)) == 0;
++}
++
++bool WriteVgaState(const std::string& path, std::string* error)
++{
++	const DacCaptureState dac_before = ReadDacCaptureState();
++	RenderScreenshotGeometry screenshot_geometry;
++	const bool renderer_geometry_available = RENDER_GetCurrentFrameScreenshotGeometry(&screenshot_geometry);
++	std::ostringstream json;
++	json << "{\n  \"guest_vga\": {\"mode\": " << Escape(mode_texts[vga.mode])
++	     << ", \"mode_id\": " << static_cast<unsigned int>(vga.mode)
++	     << ", \"width\": " << vga.draw.width << ", \"height\": " << vga.draw.height
++	     << ", \"bpp\": " << vga.draw.bpp << ", \"pitch\": " << vga.draw.line_length
++	     << ", \"display_address\": " << Escape(FormatHex(vga.draw.address, 8))
++	     << ", \"address_add\": " << vga.draw.address_add
++	     << ", \"video_memory_bytes\": " << vga.mem.memsize
++         << ", \"configured_display_start\": " << vga.config.display_start
++         << ", \"real_start\": " << vga.config.real_start
++         << ", \"pel_panning\": " << unsigned(vga.config.pel_panning)
++         << ", \"hlines_skip\": " << unsigned(vga.config.hlines_skip)
++         << ", \"bytes_skip\": " << unsigned(vga.config.bytes_skip)
++         << ", \"addr_shift\": " << unsigned(vga.config.addr_shift)
++         << ", \"chained\": " << (vga.config.chained ? "true" : "false")
++         << ", \"compatible_chain4\": " << (vga.config.compatible_chain4 ? "true" : "false")
++	     << ", \"linear_framebuffer\": {\"mapped\": " << (vga.lfb.handler ? "true" : "false")
++	     << ", \"page\": " << vga.lfb.page << ", \"address\": " << Escape(FormatHex(vga.lfb.addr, 8))
++	     << ", \"mask\": " << Escape(FormatHex(vga.lfb.mask, 8)) << "}},\n";
++	if (renderer_geometry_available) {
++		json << "  \"renderer_source\": {\"width\": " << screenshot_geometry.source_width
++		     << ", \"height\": " << screenshot_geometry.source_height
++		     << ", \"bpp\": " << screenshot_geometry.source_bpp
++		     << ", \"double_width\": " << (screenshot_geometry.double_width ? "true" : "false")
++		     << ", \"double_height\": " << (screenshot_geometry.double_height ? "true" : "false") << "},\n"
++		     << "  \"renderer_output\": {\"width\": " << screenshot_geometry.output_width
++		     << ", \"height\": " << screenshot_geometry.output_height
++		     << ", \"bpp\": " << screenshot_geometry.source_bpp << "}";
++	} else {
++		json << "  \"renderer_source\": {\"available\": false},\n"
++		     << "  \"renderer_output\": {\"available\": false}";
++	}
++	if (config.vga_include_palette) {
++		json << ",\n  \"palette_format\": " << Escape(vga.dac.bits == 8 ? "vga8" : "vga6")
++		     << ",\n  \"dac\": {\"read_index\": " << static_cast<unsigned int>(vga.dac.read_index)
++		     << ", \"write_index\": " << static_cast<unsigned int>(vga.dac.write_index)
++		     << ", \"component_state\": " << static_cast<unsigned int>(vga.dac.state)
++		     << ", \"pel_index\": " << static_cast<unsigned int>(vga.dac.pel_index)
++		     << ", \"pel_mask\": " << static_cast<unsigned int>(vga.dac.pel_mask) << "}"
++		     << ",\n  \"palette\": [";
++		for (unsigned int i = 0; i < 256; ++i) {
++			const RGBEntry& rgb = vga.dac.rgb[i];
++			json << "[" << static_cast<unsigned int>(rgb.red) << ", " << static_cast<unsigned int>(rgb.green)
++			     << ", " << static_cast<unsigned int>(rgb.blue) << "]" << (i == 255 ? "" : ",");
++		}
++		json << "]";
++	}
++	if (config.vga_include_registers) {
++		json << ",\n  \"registers\": {\"misc_output\": " << static_cast<unsigned int>(vga.misc_output)
++		     << ", \"sequencer\": {\"index\": " << static_cast<unsigned int>(vga.seq.index)
++		     << ", \"reset\": " << static_cast<unsigned int>(vga.seq.reset)
++		     << ", \"clocking_mode\": " << static_cast<unsigned int>(vga.seq.clocking_mode)
++		     << ", \"map_mask\": " << static_cast<unsigned int>(vga.seq.map_mask)
++		     << ", \"character_map_select\": " << static_cast<unsigned int>(vga.seq.character_map_select)
++		     << ", \"memory_mode\": " << static_cast<unsigned int>(vga.seq.memory_mode) << "}"
++		     << ", \"crtc\": {\"index\": " << static_cast<unsigned int>(vga.crtc.index)
++		     << ", \"horizontal_total\": " << static_cast<unsigned int>(vga.crtc.horizontal_total)
++		     << ", \"horizontal_display_end\": " << static_cast<unsigned int>(vga.crtc.horizontal_display_end)
++             << ", \"start_horizontal_blanking\": " << unsigned(vga.crtc.start_horizontal_blanking)
++             << ", \"end_horizontal_blanking\": " << unsigned(vga.crtc.end_horizontal_blanking)
++             << ", \"start_horizontal_retrace\": " << unsigned(vga.crtc.start_horizontal_retrace)
++             << ", \"end_horizontal_retrace\": " << unsigned(vga.crtc.end_horizontal_retrace)
++             << ", \"overflow\": " << unsigned(vga.crtc.overflow)
++             << ", \"preset_row_scan\": " << unsigned(vga.crtc.preset_row_scan)
++             << ", \"maximum_scan_line\": " << unsigned(vga.crtc.maximum_scan_line)
++             << ", \"cursor_start\": " << unsigned(vga.crtc.cursor_start)
++             << ", \"cursor_end\": " << unsigned(vga.crtc.cursor_end)
++             << ", \"start_address_high\": " << unsigned(vga.crtc.start_address_high)
++             << ", \"start_address_low\": " << unsigned(vga.crtc.start_address_low)
++             << ", \"cursor_location_high\": " << unsigned(vga.crtc.cursor_location_high)
++             << ", \"cursor_location_low\": " << unsigned(vga.crtc.cursor_location_low)
++             << ", \"vertical_retrace_start\": " << unsigned(vga.crtc.vertical_retrace_start)
++             << ", \"vertical_retrace_end\": " << unsigned(vga.crtc.vertical_retrace_end)
++             << ", \"start_vertical_blanking\": " << unsigned(vga.crtc.start_vertical_blanking)
++             << ", \"end_vertical_blanking\": " << unsigned(vga.crtc.end_vertical_blanking)
++             << ", \"underline_location\": " << unsigned(vga.crtc.underline_location)
++             << ", \"line_compare\": " << unsigned(vga.crtc.line_compare)
++             << ", \"read_only\": " << (vga.crtc.read_only ? "true" : "false")
++		     << ", \"vertical_total\": " << static_cast<unsigned int>(vga.crtc.vertical_total)
++		     << ", \"vertical_display_end\": " << static_cast<unsigned int>(vga.crtc.vertical_display_end)
++		     << ", \"offset\": " << static_cast<unsigned int>(vga.crtc.offset)
++		     << ", \"mode_control\": " << static_cast<unsigned int>(vga.crtc.mode_control) << "}"
++		     << ", \"graphics_controller\": {\"index\": " << static_cast<unsigned int>(vga.gfx.index)
++		     << ", \"set_reset\": " << static_cast<unsigned int>(vga.gfx.set_reset)
++		     << ", \"enable_set_reset\": " << static_cast<unsigned int>(vga.gfx.enable_set_reset)
++		     << ", \"mode\": " << static_cast<unsigned int>(vga.gfx.mode)
++		     << ", \"miscellaneous\": " << static_cast<unsigned int>(vga.gfx.miscellaneous)
++		     << ", \"bit_mask\": " << static_cast<unsigned int>(vga.gfx.bit_mask) << "}"
++		     << ", \"attribute_controller\": {\"index\": " << static_cast<unsigned int>(vga.attr.index)
++		     << ", \"mode_control\": " << static_cast<unsigned int>(vga.attr.mode_control)
++		     << ", \"color_plane_enable\": " << static_cast<unsigned int>(vga.attr.color_plane_enable)
++			 << ", \"color_select\": " << static_cast<unsigned int>(vga.attr.color_select) << "}}";
++	}
++	json << "\n}\n";
++	if (!DacCaptureStateMatches(dac_before)) {
++		if (error) *error = "VGA DAC state changed while serializing VGA state";
++		return false;
++	}
++	return WriteText(path, json.str(), error);
++}
++
++bool WriteFramebuffer(const std::string& path, std::string* error)
++{
++	if (!vga.mem.linear || !vga.mem.memsize) {
++		if (error) *error = "VGA video memory is not available";
++		return false;
++	}
++	FILE* file = fopen(path.c_str(), "wb");
++	if (!file) {
++		if (error) *error = "Unable to open " + path;
++		return false;
++	}
++	const bool written = fwrite(vga.mem.linear, 1, vga.mem.memsize, file) == vga.mem.memsize;
++	const bool flushed = fflush(file) == 0;
++	const bool closed = fclose(file) == 0;
++	if ((!written || !flushed || !closed) && error) *error = "Unable to write " + path;
++	return written && flushed && closed;
++}
++
++struct Asset {
++	std::string name;
++	std::string file;
++	std::string status;
++	std::string error;
++	uint64_t size = 0;
++	uint64_t expected_size = 0;
++	bool has_address = false;
++	uint16_t segment = 0;
++	uint32_t offset = 0;
++	uint64_t every_n_captures = 1;
++	std::string reason;
++	std::string metadata;
++};
++
++void RecordFinalizedAssetSize(const std::string& path, Asset* asset)
++{
++	struct stat info;
++	if (stat(path.c_str(), &info) == 0) {
++		asset->size = static_cast<uint64_t>(info.st_size);
++		return;
++	}
++	if (asset->status == "ok" || asset->status == "complete") {
++		asset->status = "error";
++		asset->error = "Unable to determine finalized file size";
++	}
++}
++
++bool ReadPngGeometry(const std::string& path, uint32_t* width, uint32_t* height)
++{
++	uint8_t header[24] = {};
++	FILE* file = fopen(path.c_str(), "rb");
++	if (!file) return false;
++	const bool read = fread(header, 1, sizeof(header), file) == sizeof(header);
++	const bool closed = fclose(file) == 0;
++	if (!read || !closed || std::memcmp(header, "\x89PNG\r\n\x1a\n", 8) != 0 ||
++	    std::memcmp(header + 12, "IHDR", 4) != 0) return false;
++	*width = (static_cast<uint32_t>(header[16]) << 24u) | (static_cast<uint32_t>(header[17]) << 16u) |
++	         (static_cast<uint32_t>(header[18]) << 8u) | static_cast<uint32_t>(header[19]);
++	*height = (static_cast<uint32_t>(header[20]) << 24u) | (static_cast<uint32_t>(header[21]) << 16u) |
++	          (static_cast<uint32_t>(header[22]) << 8u) | static_cast<uint32_t>(header[23]);
++	return *width != 0 && *height != 0;
++}
++
++std::string ScreenshotGeometryMetadata(const RenderScreenshotGeometry& geometry,
++				       const uint32_t png_width, const uint32_t png_height)
++{
++	std::ostringstream json;
++	json << "{\"source_width\": " << geometry.source_width
++	     << ", \"source_height\": " << geometry.source_height
++	     << ", \"output_width\": " << png_width
++	     << ", \"output_height\": " << png_height
++	     << ", \"double_width\": " << (geometry.double_width ? "true" : "false")
++	     << ", \"double_height\": " << (geometry.double_height ? "true" : "false") << "}";
++	return json.str();
++}
++
++std::string X87StateJson()
++{
++    std::ostringstream out;
++#if C_FPU
++    out << "{\"available\":true,\"internal_backend_image_not_forced_guest_save\":true"
++        << ",\"architecture\":" << unsigned(FPU_ArchitectureType)
++        << ",\"cw\":" << fpu.cw.reg << ",\"sw\":" << fpu.sw.reg
++        << ",\"top\":" << unsigned(fpu.sw.top) << ",\"physical_slots\":[";
++    for (unsigned int i = 0; i < 9; ++i) {
++        if (i) out << ',';
++        out << "{\"slot\":" << i << ",\"tag\":" << unsigned(fpu.tags[i])
++            << ",\"backing80_hex\":" << Escape(FormatHex(fpu.regs_80[i].raw.h, 4) + FormatHex(fpu.regs_80[i].raw.l, 16));
++#if defined(HAS_LONG_DOUBLE) || C_FPU_X86
++        out << ",\"authoritative_encoding\":\"extended80\"";
++#else
++        out << ",\"binary64_hex\":" << Escape(FormatHex(uint64_t(fpu.regs[i].ll), 16))
++            << ",\"use80\":" << (fpu.use80[i] ? "true" : "false")
++            << ",\"authoritative_encoding\":" << Escape(fpu.use80[i] ? "extended80" : "binary64");
++#endif
++        out << '}';
++    }
++    out << "],\"mxcsr\":" << fpu.mxcsr << ",\"instruction_data_pointers_available\":false}";
++#else
++    out << "{\"available\":false,\"reason\":\"C_FPU disabled\"}";
++#endif
++    return out.str();
++}
++
++std::string EventContext()
++{
++    std::ostringstream out;
++    out << "\"sequence\":" << event_sequence++ << ",\"normal_boundary\":" << instruction_boundary_count
++        << ",\"time_ms\":" << std::setprecision(std::numeric_limits<pic_tickindex_t>::max_digits10) << PIC_FullIndex()
++        << ",\"cs\":" << Escape(FormatHex(SegValue(cs), 4)) << ",\"eip\":" << Escape(FormatHex(reg_eip, 8))
++        << ",\"ss\":" << Escape(FormatHex(SegValue(ss), 4)) << ",\"esp\":" << Escape(FormatHex(reg_esp, 8));
++    return out.str();
++}
++
++void AppendEvent(const std::string& json)
++{
++    if (reference_events.size() < config.max_events) reference_events.push_back(json);
++    else ++dropped_events;
++}
++
++std::string DeviceStateJson()
++{
++    return "{\"format_version\":1,\"passive\":true,\"pit\":" + AUTOCAP_PITStateJson() +
++        ",\"pic\":" + AUTOCAP_PICStateJson() + ",\"keyboard\":" + AUTOCAP_KeyboardStateJson() + ",\"bios_timer\":" + AUTOCAP_BIOSTimerStateJson() + "}\n";
++}
++
++bool Capture(const bool manual, const uint64_t scheduled_us, const uint64_t missed_periods,
++		const char* event_trigger, std::string* capture_error)
++{
++	if (state != State::Running) return false;
++    FillFlags();
++	state = State::Capturing;
++	const uint64_t id = capture_sequence++;
++	const uint64_t actual_us = GuestTimeUs();
++	const std::string base_name = "capture_" + [&]() { std::ostringstream s; s << std::setw(6) << std::setfill('0') << id; return s.str(); }();
++	const std::string temporary = Join(session_path, base_name + ".tmp");
++	const std::string final_path = Join(session_path, base_name);
++	std::vector<Asset> assets;
++	bool all_ok = MakeDirectory(temporary);
++	if (!all_ok) {
++		if (capture_error) *capture_error = "Unable to create capture directory " + temporary;
++		state = State::Running;
++		return false;
++	}
++	std::string error;
++	const std::string complete_status = config.version == 2 ? "complete" : "ok";
++	const auto asset_ok = [&](const Asset& asset) { return asset.status == complete_status; };
++	const auto skipped_asset = [&](const std::string& name, const uint64_t cadence) {
++		Asset asset; asset.name = name; asset.status = "skipped"; asset.reason = "cadence";
++		asset.every_n_captures = cadence; assets.push_back(asset);
++	};
++	if (config.registers) {
++		if (config.version == 2 && !IsDue(id, config.registers_every_n_captures)) {
++			skipped_asset("registers", config.registers_every_n_captures);
++		} else {
++		Asset asset; asset.name = "registers"; asset.file = "registers.json";
++		asset.status = WriteRegisters(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++		RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++		all_ok = all_ok && asset_ok(asset);
++		assets.push_back(asset);
++		}
++	}
++	if (config.screenshot) {
++		if (config.version == 2 && !IsDue(id, config.screenshot_every_n_captures)) {
++			skipped_asset("screenshot", config.screenshot_every_n_captures);
++		} else {
++		Asset asset; asset.name = "screenshot"; asset.file = "screenshot.png";
++		RenderScreenshotGeometry screenshot_geometry;
++        const std::string surface_before = RENDER_CaptureSurfaceMetadata();
++		const bool renderer_geometry_available = config.version != 2 ||
++			RENDER_GetCurrentFrameScreenshotGeometry(&screenshot_geometry);
++		asset.status = RENDER_SaveCurrentFramePng(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++		if (asset_ok(asset)) {
++			RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++			if (config.version == 2) {
++				uint32_t png_width = 0, png_height = 0;
++				if (!renderer_geometry_available || !ReadPngGeometry(Join(temporary, asset.file), &png_width, &png_height)) {
++					asset.status = "partial";
++					asset.error = "Unable to read finalized PNG geometry";
++				} else {
++					asset.metadata = "{\"screenshot_geometry\": " +
++						ScreenshotGeometryMetadata(screenshot_geometry, png_width, png_height) +
++                        ",\"render_surface\":" + surface_before + "}";
++                    if (surface_before != RENDER_CaptureSurfaceMetadata()) {
++                        asset.status = "error"; asset.error = "Renderer changed during PNG serialization";
++                    }
++				}
++			}
++		}
++		all_ok = all_ok && asset_ok(asset);
++		assets.push_back(asset);
++		}
++	}
++	if (config.machine_state.enabled) {
++		if (!IsDue(id, config.machine_state.every_n_captures)) skipped_asset("machine_state", config.machine_state.every_n_captures);
++		else {
++			Asset asset; asset.name = "machine_state"; asset.file = "machine_state.json";
++			asset.status = WriteMachineState(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++			RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++			all_ok = all_ok && asset_ok(asset); assets.push_back(asset);
++		}
++	}
++	if (config.vga_state.enabled) {
++		if (!IsDue(id, config.vga_state.every_n_captures)) skipped_asset("vga_state", config.vga_state.every_n_captures);
++		else {
++			Asset asset; asset.name = "vga_state"; asset.file = "vga_state.json";
++			asset.status = WriteVgaState(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++			RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++			all_ok = all_ok && asset_ok(asset); assets.push_back(asset);
++		}
++	}
++	if (config.framebuffer.enabled) {
++		if (!IsDue(id, config.framebuffer.every_n_captures)) skipped_asset("framebuffer", config.framebuffer.every_n_captures);
++		else {
++			Asset asset; asset.name = "framebuffer"; asset.file = "framebuffer.bin";
++			asset.expected_size = vga.mem.memsize;
++			asset.metadata = "{\"provenance\": \"vga.mem.linear\", \"byte_size\": " + std::to_string(vga.mem.memsize) +
++				", \"width\": " + std::to_string(vga.draw.width) + ", \"height\": " + std::to_string(vga.draw.height) +
++				", \"pitch\": " + std::to_string(vga.draw.line_length) + ", \"bpp\": " + std::to_string(vga.draw.bpp) +
++				", \"display_address\": " + Escape(FormatHex(vga.draw.address, 8)) +
++				", \"pixel_format\": " + Escape(mode_texts[vga.mode]) + ", \"palette_dependency\": " +
++				((vga.draw.bpp == 8) ? "true" : "false") + ", \"draw_metadata_only_not_guest_pixel_layout\": true}";
++			if (!vga.mem.linear || !vga.mem.memsize) {
++				asset.status = "unavailable"; asset.reason = "no coherent VGA video-memory source";
++			} else {
++				asset.status = WriteFramebuffer(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++				RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++				all_ok = all_ok && asset_ok(asset);
++			}
++			assets.push_back(asset);
++		}
++	}
++    if (config.render_surface.enabled) {
++        Asset asset;
++        asset.name = "render_surface"; asset.file = "render_surface.bin";
++        if (!IsDue(id, config.render_surface.every_n_captures)) {
++            asset.status = "skipped"; asset.reason = "cadence";
++            asset.file.clear();
++            asset.every_n_captures = config.render_surface.every_n_captures;
++        } else {
++            asset.metadata = RENDER_CaptureSurfaceMetadata();
++            asset.status = RENDER_SaveCaptureSurface(Join(temporary, asset.file), &asset.error) ? complete_status : "error";
++            if (asset.metadata != RENDER_CaptureSurfaceMetadata()) {
++                asset.status = "error"; asset.error = "Renderer state changed while serializing cache";
++            }
++            RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++            all_ok = all_ok && asset_ok(asset);
++        }
++        assets.push_back(asset);
++    }
++    const AssetConfiguration* extra_configs[] = {&config.device_state, &config.x87_state};
++    const char* extra_names[] = {"device_state", "x87_state"};
++    for (unsigned int n = 0; n < 2; ++n) {
++        if (!extra_configs[n]->enabled) continue;
++        Asset asset;
++        asset.name = extra_names[n];
++        asset.file = asset.name + ".json";
++        if (!IsDue(id, extra_configs[n]->every_n_captures)) {
++            asset.status = "skipped"; asset.reason = "cadence";
++            asset.file.clear();
++            asset.every_n_captures = extra_configs[n]->every_n_captures;
++        } else {
++            asset.status = WriteText(Join(temporary, asset.file), n == 0 ? DeviceStateJson() : X87StateJson(), &asset.error) ? complete_status : "error";
++            RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++            all_ok = all_ok && asset_ok(asset);
++        }
++        assets.push_back(asset);
++    }
++    if (config.reference_enabled) {
++        Asset asset;
++        asset.name = "reference_trace";
++        asset.file = "reference_trace.jsonl";
++        std::ostringstream trace;
++        for (const auto& event : reference_events) trace << event << '\n';
++        asset.status = WriteText(Join(temporary, asset.file), trace.str(), &asset.error) ? complete_status : "error";
++        if (dropped_events && asset.error.empty()) {
++            asset.status = "partial";
++            asset.error = "Trace overflow: " + std::to_string(dropped_events) + " events dropped; NOT a complete reference trace";
++        }
++        RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++        all_ok = all_ok && asset_ok(asset);
++        assets.push_back(asset);
++    }
++	for (std::vector<MemoryRegion>::const_iterator region = config.memory.begin(); region != config.memory.end(); ++region) {
++		Asset asset;
++		asset.name = region->name;
++		if (config.version == 2 && !IsDue(id, region->every_n_captures)) {
++			asset.status = "skipped"; asset.reason = "cadence"; asset.every_n_captures = region->every_n_captures;
++			assets.push_back(asset);
++			continue;
++		}
++		asset.expected_size = region->length;
++		asset.has_address = true;
++		asset.segment = region->segment;
++		asset.offset = region->offset;
++		std::ostringstream file;
++		file << "memory_" << region->name << "_" << FormatHex(region->segment, 4) << "_"
++		     << FormatHex(region->offset, 8) << "_" << FormatHex(region->length, 8) << ".bin";
++		asset.file = file.str();
++		uint64_t unreadable = 0;
++		asset.status = DEBUG_DumpMemoryBinary(region->segment, region->offset, region->length,
++		                                      Join(temporary, asset.file), &unreadable, &asset.error) ? complete_status : "error";
++		RecordFinalizedAssetSize(Join(temporary, asset.file), &asset);
++		if (unreadable) {
++			asset.status = "partial";
++			asset.error = std::to_string(unreadable) + " unreadable bytes were zero-filled";
++		}
++		all_ok = all_ok && asset_ok(asset);
++		assets.push_back(asset);
++	}
++	const uint64_t lateness = manual || actual_us < scheduled_us ? 0 : actual_us - scheduled_us;
++	std::ostringstream json;
++	json << "{\n  \"format_version\": " << config.version << ",\n  \"capture\": " << id
++	     << ",\n  \"status\": " << Escape(all_ok ? "complete" : "partial")
++	     << ",\n  \"trigger\": {\"type\": " << Escape(event_trigger ? "event" : (manual ? "manual" : "emulated_time"))
++	     << ", \"scheduled_us\": " << (manual ? actual_us : scheduled_us)
++	     << ", \"actual_us\": " << actual_us << ", \"lateness_us\": " << lateness
++	     << ", \"missed_intervals\": " << (manual ? 0 : missed_periods);
++	if (event_trigger) json << ", \"event\": " << Escape(event_trigger);
++	json << "},\n"
++	     << "  \"process\": {\"executable\": " << Escape(process_name) << ", \"psp\": " << Escape(FormatHex(tracked_psp, 4)) << "},\n"
++	     << "  \"time\": {\"process_elapsed_us\": " << (actual_us - process_start_us)
++	     << ", \"capture_session_elapsed_us\": " << (actual_us - session_start_us) << "},\n"
++	     << "  \"cpu\": {\"cycle_mode\": " << Escape(CPU_CycleAutoAdjust ? "auto" : "fixed")
++	     << ", \"configured_cycles\": " << static_cast<uint64_t>(CPU_CycleMax) << "},\n";
++	if (config.version == 2) {
++		json << "  \"execution\": {\"cs\": " << Escape(FormatHex(SegValue(cs), 4))
++		     << ", \"eip\": " << Escape(FormatHex(reg_eip, 8))
++		     << ", \"selector_base\": " << Escape(FormatHex(SegPhys(cs), 8))
++		     << ", \"linear_instruction_address\": " << Escape(FormatHex(SegPhys(cs) + reg_eip, 8))
++             << ", \"instruction_counter\": " << (config.reference_enabled ? std::to_string(instruction_boundary_count) : "null")
++             << ", \"instruction_counter_kind\": " << Escape(config.reference_enabled ? "normal_core_pre_dispatch_boundaries_not_retired_instructions" : "unavailable") << "},\n";
++        json << "  \"captureBoundary\": {\"kind\":" << Escape(at_instruction_boundary ? "normal_core_pre_instruction" : "cpu_dispatch_safe_point")
++             << ",\"address_occurrence\":" << selected_occurrence
++             << ",\"cpu_core\":" << Escape(cpudecoder == CPU_Core_Normal_Run ? "normal" : "other")
++             << ",\"trace_interval_start_boundary\":" << trace_interval_start
++             << ",\"dropped_events\":" << dropped_events
++             << ",\"cpu_settings_override\":" << (cpu_settings_override ? "true" : "false")
++             << ",\"cpu_trace_incomplete\":" << (cpu_trace_incomplete ? "true" : "false")
++             << ",\"invocation_pair\":{\"active\":" << (invocation_pair.active ? "true" : "false")
++             << ",\"source_boundary\":" << invocation_pair.source_boundary
++             << ",\"source_capture\":" << invocation_pair.source_capture
++             << ",\"source_esp\":" << invocation_pair.source_esp
++             << ",\"caller_esp\":" << invocation_pair.caller_esp
++             << ",\"cs\":" << invocation_pair.cs << ",\"cs_base\":" << invocation_pair.cs_base
++             << ",\"ss\":" << invocation_pair.ss << ",\"ss_base\":" << invocation_pair.ss_base
++             << ",\"kind\":\"observed_32bit_near_call_stack_context_not_retirement_proof\"}"
++             << ",\"display_synchronous_with_cpu\":false,\"control_flow_tail\":[";
++        for (size_t n = 0; n < boundary_tail.size(); ++n) { if (n) json << ','; json << boundary_tail[n]; }
++        json << "]},\n";
++	}
++	json << "  \"assets\": {\n";
++	for (size_t i = 0; i < assets.size(); ++i) {
++		const Asset& asset = assets[i];
++		json << "    " << Escape(asset.name) << ": {\"status\": " << Escape(asset.status)
++		     << ", \"file\": " << Escape(asset.file) << ", \"size\": " << asset.size;
++		if (asset.expected_size) json << ", \"expected_size\": " << asset.expected_size;
++		if (asset.has_address) json << ", \"segment\": " << Escape(FormatHex(asset.segment, 4))
++		                           << ", \"offset\": " << Escape(FormatHex(asset.offset, 8));
++		if (!asset.reason.empty()) json << ", \"reason\": " << Escape(asset.reason);
++		if (asset.status == "skipped") json << ", \"every_n_captures\": " << asset.every_n_captures;
++		if (!asset.metadata.empty()) json << ", \"metadata\": " << asset.metadata;
++		if (!asset.error.empty()) json << ", \"error\": " << Escape(asset.error);
++		json << "}" << (i + 1 == assets.size() ? "\n" : ",\n");
++	}
++	json << "  }\n}\n";
++	if (!WriteText(Join(temporary, "capture.json"), json.str(), &error)) {
++		all_ok = false;
++		LOG_MSG("AUTOCAP: %s", error.c_str());
++		if (capture_error) *capture_error = error;
++		state = State::Running;
++		if (config.stop_on_error) AUTOCAP_Stop("capture_metadata_error");
++		return false;
++	}
++#ifdef WIN32
++	const bool finalized = MoveFileExA(temporary.c_str(), final_path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
++#else
++	const bool finalized = rename(temporary.c_str(), final_path.c_str()) == 0;
++#endif
++	if (!finalized) {
++		all_ok = false;
++		if (capture_error) *capture_error = "Unable to finalize capture directory " + temporary;
++		LOG_MSG("AUTOCAP: Unable to finalize capture directory %s", temporary.c_str());
++	} else {
++		++completed_captures;
++        // A failed/partial capture keeps the buffered events for recovery.
++        if (all_ok) { reference_events.clear(); dropped_events = 0; trace_interval_start = instruction_boundary_count; }
++	}
++	LOG_MSG("AUTOCAP: Capture %llu %s", static_cast<unsigned long long>(id), all_ok ? "complete" : "partial");
++	state = State::Running;
++	if (!all_ok && capture_error && capture_error->empty()) *capture_error = "One or more capture assets failed";
++	if (!all_ok && config.stop_on_error) AUTOCAP_Stop("capture_error");
++	return all_ok;
++}
++
++} // namespace
++
++bool AUTOCAP_GenerateExampleConfiguration(const std::string& folder, std::string* path, std::string* error)
++{
++	if (path) path->clear();
++	if (error) error->clear();
++	if (!IsDirectory(folder)) {
++		if (error) *error = "Choose an existing folder for the example configuration.";
++		return false;
++	}
++	const std::string output = Join(folder, "automatic-captures");
++	const std::string contents =
++		"{\n"
++		"  \"version\": 1,\n"
++		"  \"output\": { \"directory\": " + Escape(output) + " },\n"
++		"  \"trigger\": { \"type\": \"emulated_time\", \"interval_ms\": 2000, \"initial_delay_ms\": 1000 },\n"
++		"  \"process\": { \"mode\": \"current_or_next\", \"on_exit\": \"stop\" },\n"
++		"  \"capture\": {\n"
++		"    \"screenshot\": { \"enabled\": true, \"format\": \"png\" },\n"
++		"    \"registers\": { \"enabled\": true, \"format\": \"json\" },\n"
++		"    \"memory\": [\n"
++		"      { \"name\": \"main\", \"segment\": \"0008\", \"offset\": \"00000000\", \"length\": \"00040000\", \"format\": \"binary\" }\n"
++		"    ]\n"
++		"  },\n"
++		"  \"error_handling\": { \"on_capture_error\": \"continue\" }\n"
++		"}\n";
++	for (unsigned int suffix = 1; suffix < 1000; ++suffix) {
++		const std::string filename = suffix == 1 ? "automatic-capture-example.json" :
++			"automatic-capture-example-" + std::to_string(suffix) + ".json";
++		const std::string candidate = Join(folder, filename);
++		bool exists = false;
++		if (WriteNewText(candidate, contents, &exists)) {
++			if (path) *path = candidate;
++			LOG_MSG("AUTOCAP: Example configuration created: %s", candidate.c_str());
++			return true;
++		}
++		if (!exists) {
++			if (error) *error = "Unable to create example configuration in " + folder;
++			return false;
++		}
++	}
++	if (error) *error = "Too many example configurations in " + folder;
++	return false;
++}
++
++void AUTOCAP_SelectConfiguration()
++{
++	std::string error;
++	if (!config_path.empty() && ParseConfiguration(config_path, &config, &error)) {
++		LOG_MSG("AUTOCAP: Configuration loaded: %s", config_path.c_str());
++		return;
++	}
++	if (error.empty()) error = "Select a valid automatic capture JSON file.";
++	systemmessagebox("Automatic capture", error.c_str(), "ok", "warning", 1);
++}
++
++void AUTOCAP_SetConfigurationPath(const std::string& path)
++{
++	if (state != State::Disabled) {
++		systemmessagebox("Automatic capture", "Stop the active session before changing its configuration.", "ok", "warning", 1);
++		return;
++	}
++	Configuration loaded;
++	std::string error;
++	if (!path.empty() && ParseConfiguration(path, &loaded, &error)) {
++		config_path = path;
++		config = loaded;
++		LOG_MSG("AUTOCAP: Configuration selected: %s", config_path.c_str());
++		AUTOCAP_RefreshMenuItems();
++	} else if (!path.empty()) {
++		systemmessagebox("Automatic capture", error.c_str(), "ok", "warning", 1);
++	}
++}
++
++bool AUTOCAP_Start(std::string* error)
++{
++	if (error) error->clear();
++	if (state != State::Disabled) {
++		if (error) *error = "Automatic capture is already active";
++		return false;
++	}
++	if (dos_kernel_disabled || RunningProgram == "LOADLIN") {
++		if (error) *error = "Automatic capture requires the DOS kernel and PSP tracking";
++		return false;
++	}
++	Configuration loaded;
++	if (config_path.empty()) {
++		if (error) *error = "Select an automatic capture configuration first";
++		return false;
++	}
++	if (!ParseConfiguration(config_path, &loaded, error)) return false;
++    cpu_settings_override = cpu_trace_incomplete = false;
++    if (loaded.reference_enabled && !CheckReferenceCPUSettings(loaded)) {
++        if (error) error->clear(); // The warning already explained cancellation.
++        return false;
++    }
++	config = loaded;
++	if (!CreateSessionDirectory(error)) return false;
++	state = State::Armed;
++	capture_sequence = 0;
++	completed_captures = 0;
++	manual_pending = false;
++	periodic_pending = false;
++	video_mode_initialized = false;
++	execution_address_latched = false;
++    instruction_boundary_count = event_sequence = dropped_events = trace_interval_start = 0;
++    reference_events.clear();
++    boundary_tail.clear();
++    reference_recording = !config.start_at_first_address;
++    previous_boundary_valid = false;
++    selected_occurrence = 0;
++    invocation_pair = InvocationPair{};
++	stop_reason.clear();
++	session_created_host_time = IsoHostTime();
++	session_start_us = GuestTimeUs();
++	process_start_us = 0;
++	tracked_psp = 0;
++	process_name.clear();
++	if (!WriteAtomic(Join(session_path, "session.json"), SessionManifest("armed"), error)) {
++		state = State::Disabled;
++		return false;
++	}
++	if (!IsShellProcess()) Attach(RunningProgram.c_str(), dos.psp());
++	AUTOCAP_RefreshMenuItems();
++	LOG_MSG("AUTOCAP: Session started: %s", session_path.c_str());
++	return true;
++}
++
++void AUTOCAP_Stop(const char* reason)
++{
++	if (state == State::Disabled) return;
++	stop_reason = reason ? reason : "user";
++	std::string error;
++    if (config.reference_enabled && !reference_events.empty()) {
++        std::ostringstream trace;
++        for (const auto& event : reference_events) trace << event << '\n';
++        if (!WriteText(Join(session_path, "reference_tail.jsonl"), trace.str(), &error)) {
++            LOG_MSG("AUTOCAP: Unable to save reference trace tail: %s", error.c_str());
++            stop_reason += "_trace_tail_write_failed";
++        }
++    }
++	if (!session_path.empty() && !WriteAtomic(Join(session_path, "session.json"), SessionManifest("stopped"), &error))
++		LOG_MSG("AUTOCAP: %s", error.c_str());
++	LOG_MSG("AUTOCAP: Session stopped (%s)", stop_reason.c_str());
++	state = State::Disabled;
++	manual_pending = false;
++	periodic_pending = false;
++	tracked_psp = 0;
++	AUTOCAP_RefreshMenuItems();
++}
++
++void AUTOCAP_ReloadConfiguration(std::string* error)
++{
++	if (state != State::Disabled) {
++		if (error) *error = "Stop automatic capture before reloading its configuration";
++		return;
++	}
++	Configuration loaded;
++	if (config_path.empty()) {
++		if (error) *error = "Select an automatic capture configuration first";
++		return;
++	}
++	if (!ParseConfiguration(config_path, &loaded, error)) return;
++	config = loaded;
++	if (error) error->clear();
++	LOG_MSG("AUTOCAP: Configuration loaded: %s", config_path.c_str());
++	AUTOCAP_RefreshMenuItems();
++}
++
++void AUTOCAP_RequestManualCapture()
++{
++	if (state == State::Running || state == State::Capturing) manual_pending = true;
++	else LOG_MSG("AUTOCAP: Capture now requires an attached running process");
++}
++
++std::string AUTOCAP_FormatStatus()
++{
++	const char* label = state == State::Disabled ? "Disabled" : state == State::Armed ? "Armed" : state == State::Running ? "Running" : "Capturing";
++	std::ostringstream out;
++	out << "Automatic capture\n\nStatus: " << label
++	    << "\nConfiguration: " << (config_path.empty() ? "(not selected)" : config_path)
++	    << "\nSession: " << (session_path.empty() ? "(none)" : session_path);
++	if (tracked_psp) {
++		const uint64_t now = GuestTimeUs();
++		const uint64_t elapsed_next = next_periodic_us >= process_start_us ? next_periodic_us - process_start_us : 0;
++		out << "\nProcess: " << process_name << " PSP=" << FormatHex(tracked_psp, 4)
++		    << "\nProcess elapsed: " << ((now - process_start_us) / 1000000) << "."
++		    << std::setw(3) << std::setfill('0') << ((now - process_start_us) / 1000) % 1000 << " s"
++		    << "\nCaptures: " << completed_captures
++		    << "\nNext capture deadline: " << (elapsed_next / 1000000) << "."
++		    << std::setw(3) << ((elapsed_next / 1000) % 1000) << " s after process start";
++	}
++	return out.str();
++}
++
++void AUTOCAP_OnProgramStart(const char* executable, const uint16_t psp, const uint16_t parent_psp)
++{
++	(void)parent_psp;
++	if (state == State::Armed) Attach(executable, psp);
++}
++
++void AUTOCAP_OnProgramExit(const uint16_t psp)
++{
++	if (state == State::Running && psp == tracked_psp) {
++		if (config.events_enabled && config.event_process_exit) {
++			std::string error;
++			Capture(false, GuestTimeUs(), 0, "process_exit", &error);
++		}
++		AUTOCAP_Stop("process_exit");
++	}
++}
++
++void AUTOCAP_PumpSafePoint()
++{
++	if (state != State::Running) return;
++    if (config.reference_enabled &&
++        (cpudecoder != acknowledged_decoder || CPU_CycleAutoAdjust != acknowledged_auto_cycles ||
++         CPU_AutoDetermineMode != acknowledged_auto_mode ||
++         (!CPU_CycleAutoAdjust && CPU_CycleMax != acknowledged_cycles))) {
++        // A valid starting fixed count is also the baseline when no count was specified.
++        Configuration expected = config;
++        if (!expected.expected_cycles && !acknowledged_auto_cycles && acknowledged_cycles > 0)
++            expected.expected_cycles = uint64_t(acknowledged_cycles);
++        if (!CheckReferenceCPUSettings(expected)) {
++            AUTOCAP_Stop("reference_cpu_settings_warning_cancelled");
++            return;
++        }
++    }
++	const uint64_t now = GuestTimeUs();
++	if (config.events_enabled) {
++		if (config.event_video_mode_change && video_mode_initialized && vga.mode != attached_video_mode) {
++			const VGAModes previous = attached_video_mode;
++			attached_video_mode = vga.mode;
++			std::string error;
++			Capture(false, now, 0, "video_mode_change", &error);
++			LOG_MSG("AUTOCAP: video mode changed from %u to %u", static_cast<unsigned int>(previous), static_cast<unsigned int>(vga.mode));
++		}
++        if (!config.reference_enabled) {
++		bool execution_address_matched = false;
++		for (std::vector<ExecutionAddress>::const_iterator address = config.execution_addresses.begin();
++		     address != config.execution_addresses.end(); ++address) {
++			if (address->selector == SegValue(cs) && address->offset == reg_eip) {
++				execution_address_matched = true;
++				break;
++			}
++		}
++		if (execution_address_matched && !execution_address_latched) {
++			std::string error;
++			Capture(false, now, 0, "execution_address", &error);
++		}
++		execution_address_latched = execution_address_matched;
++        }
++	}
++	if (!periodic_pending && now >= next_periodic_us) {
++		periodic_pending = true;
++		pending_scheduled_us = next_periodic_us;
++		pending_missed_periods = 0;
++		do {
++			if (next_periodic_us > (std::numeric_limits<uint64_t>::max)() - config.interval_us) {
++				next_periodic_us = (std::numeric_limits<uint64_t>::max)();
++				break;
++			}
++			next_periodic_us += config.interval_us;
++			if (next_periodic_us <= now) ++pending_missed_periods;
++		} while (next_periodic_us <= now);
++	}
++	if (periodic_pending) {
++		periodic_pending = false;
++		std::string error;
++		Capture(false, pending_scheduled_us, pending_missed_periods, NULL, &error);
++		pending_missed_periods = 0;
++	}
++	if (manual_pending && state == State::Running) {
++		manual_pending = false;
++		std::string error;
++		Capture(true, now, 0, NULL, &error);
++	}
++}
++
++bool AUTOCAP_WantsInstructionBoundary()
++{
++    return state == State::Running && config.reference_enabled;
++}
++
++void AUTOCAP_OnInstructionBoundary()
++{
++    if (!AUTOCAP_WantsInstructionBoundary()) return;
++    ++instruction_boundary_count;
++    selected_occurrence = 0;
++    // Periodic snapshots need only a counter; avoid clocks, JSON, flags and
++    // deque allocation at every instruction when no detailed tracing is requested.
++    if (!config.trace_instructions && (!config.events_enabled || config.execution_addresses.empty())) return;
++    FillFlags();
++    const auto context = EventContext();
++    boundary_tail.push_back("{" + context + "}");
++    if (boundary_tail.size() > 64) boundary_tail.pop_front();
++    const auto record_boundary = [&]() {
++        std::ostringstream out;
++        out << "{\"kind\":\"instruction_boundary\"," << context
++            << ",\"eax\":" << reg_eax << ",\"ebx\":" << reg_ebx << ",\"ecx\":" << reg_ecx
++            << ",\"edx\":" << reg_edx << ",\"esi\":" << reg_esi << ",\"edi\":" << reg_edi
++            << ",\"ebp\":" << reg_ebp << ",\"eflags\":" << reg_flags;
++#if C_FPU
++        out << ",\"x87_cw\":" << fpu.cw.reg << ",\"x87_sw\":" << fpu.sw.reg;
++#endif
++        out << '}';
++        AppendEvent(out.str());
++    };
++    const bool boundary_recorded = config.trace_instructions && reference_recording;
++    if (boundary_recorded) record_boundary();
++    const bool have_previous = previous_boundary_valid;
++    const auto previous_cs = previous_boundary_cs;
++    const auto previous_eip = previous_boundary_eip;
++    const auto caller_ss = previous_boundary_ss;
++    const auto caller_ss_base = previous_boundary_ss_base;
++    const auto caller_esp = previous_boundary_esp;
++    const auto caller_stack_big = previous_stack_big;
++    previous_boundary_ss = SegValue(ss);
++    previous_boundary_ss_base = SegPhys(ss);
++    previous_boundary_esp = reg_esp;
++    previous_stack_big = cpu.stack.big;
++    previous_boundary_cs = SegValue(cs);
++    previous_boundary_eip = reg_eip;
++    previous_boundary_valid = true;
++    if (!config.events_enabled) return;
++    const bool paired_return_matches = invocation_pair.active && invocation_pair.source_captured &&
++        cpu.stack.big && SegValue(cs) == invocation_pair.cs && SegPhys(cs) == invocation_pair.cs_base &&
++        SegValue(ss) == invocation_pair.ss && SegPhys(ss) == invocation_pair.ss_base &&
++        reg_esp == invocation_pair.caller_esp;
++    for (auto& address : config.execution_addresses) {
++        if (address.pair_return && !paired_return_matches) continue;
++        if (address.selector == SegValue(cs) && address.offset == reg_eip &&
++            (!address.has_previous_offset || (have_previous && previous_cs == address.selector && previous_eip == address.previous_offset))) ++address.seen;
++    }
++    for (auto& address : config.execution_addresses) {
++        if (address.pair_return && !paired_return_matches) continue;
++        if (address.pair_source && invocation_pair.active) continue;
++        if (address.selector != SegValue(cs) || address.offset != reg_eip) continue;
++        if (address.has_previous_offset && (!have_previous || previous_cs != address.selector || previous_eip != address.previous_offset)) continue;
++        if (address.occurrence && address.occurrence != address.seen) continue;
++        if (address.pair_source) {
++            if (!have_previous || !caller_stack_big || !cpu.stack.big || caller_ss != SegValue(ss) ||
++                caller_ss_base != SegPhys(ss) || uint32_t(reg_esp + 4u) != caller_esp) {
++                AUTOCAP_Stop("reference_source_near_call_stack_mismatch");
++                return;
++            }
++            invocation_pair.active = true;
++            invocation_pair.cs = SegValue(cs); invocation_pair.cs_base = SegPhys(cs);
++            invocation_pair.ss = SegValue(ss); invocation_pair.ss_base = SegPhys(ss);
++            invocation_pair.caller_esp = caller_esp; invocation_pair.source_esp = reg_esp;
++            invocation_pair.source_boundary = instruction_boundary_count;
++            invocation_pair.source_capture = capture_sequence;
++        }
++        selected_occurrence = address.seen;
++        reference_recording = true;
++        if (config.trace_instructions && !boundary_recorded) record_boundary();
++        at_instruction_boundary = true;
++        std::string error;
++        const bool success = Capture(false, GuestTimeUs(), 0, "execution_address", &error);
++        at_instruction_boundary = false;
++        if (address.pair_source) {
++            invocation_pair.source_captured = success;
++            if (!success) { AUTOCAP_Stop("reference_pair_source_capture_failed"); return; }
++        }
++        if (address.stop_after_capture) AUTOCAP_Stop(success ? "reference_endpoint_captured" : "reference_endpoint_capture_failed");
++        break; // duplicate address specifications do not produce duplicate captures
++    }
++}
++
++void AUTOCAP_RecordInstructionFetch(const uint32_t value, const unsigned int width)
++{
++    if (!AUTOCAP_WantsInstructionBoundary() || !reference_recording || !config.trace_instructions) return;
++    AppendEvent("{\"kind\":\"instruction_fetch\"," + EventContext() +
++                ",\"width\":" + std::to_string(width) + ",\"little_endian_value\":" + std::to_string(value) + "}");
++}
++
++void AUTOCAP_RecordIO(const bool write, const uint32_t port, const uint32_t value, const unsigned int width)
++{
++    if (!AUTOCAP_WantsInstructionBoundary() || !reference_recording) return;
++    if (port != 0x40 && port != 0x41 && port != 0x42 && port != 0x43 &&
++        port != 0x20 && port != 0x21 && port != 0xa0 && port != 0xa1 && port != 0x60 && port != 0x64) return;
++    const std::string after = port >= 0x40 && port <= 0x43 ? AUTOCAP_PITStateJson() :
++        (port == 0x60 || port == 0x64 ? AUTOCAP_KeyboardStateJson() : AUTOCAP_PICStateJson());
++    AppendEvent("{\"kind\":\"io_dispatch\"," + EventContext() + ",\"direction\":" + Escape(write ? "out" : "in") +
++                ",\"port\":" + std::to_string(port) + ",\"width\":" + std::to_string(width) +
++                ",\"value\":" + std::to_string(value) + ",\"origin\":\"io_dispatch_may_include_bios_internal_calls\",\"device_after\":" + after + "}");
++}
++
++void AUTOCAP_RecordBIOSTimerEvent(const char* kind)
++{
++    if (!AUTOCAP_WantsInstructionBoundary() || !reference_recording) return;
++    AppendEvent("{\"kind\":" + Escape(kind) + "," + EventContext() +
++                ",\"source\":\"INT8_Handler\",\"state\":" + AUTOCAP_BIOSTimerStateJson() + "}");
++}
++
++void AUTOCAP_RecordEvent(const char* kind, const uint32_t value)
++{
++    if (!AUTOCAP_WantsInstructionBoundary() || !reference_recording) return;
++    AppendEvent("{\"kind\":" + Escape(kind) + "," + EventContext() + ",\"value\":" + std::to_string(value) + "}");
++}
++
++bool AUTOCAP_IsActive() { return state != State::Disabled; }
++bool AUTOCAP_IsAttached() { return state == State::Running || state == State::Capturing; }
++bool AUTOCAP_HasConfiguration() { return !config_path.empty(); }
++
++#endif
+diff --git a/src/debug/debug.cpp b/src/debug/debug.cpp
+index 71c77d5c4..83cebb8fb 100644
+--- a/src/debug/debug.cpp
++++ b/src/debug/debug.cpp
+@@ -6282,20 +6282,41 @@ static void SaveMemory(uint16_t seg, uint32_t ofs1, uint32_t num, const char *fi
+ 	DEBUG_ShowMsg("DEBUG: Memory dump success.\n");
+ }
+ 
+-static void SaveMemoryBin(uint16_t seg, uint32_t ofs1, uint32_t num, const char *filename) {
+-	FILE* f = fopen(filename,"wb");
++bool DEBUG_DumpMemoryBinary(uint16_t seg, uint32_t ofs1, uint32_t num,
++		const std::string& filename, uint64_t* unreadable, std::string* error) {
++	if (static_cast<uint64_t>(ofs1) + num > 0x100000000ULL) {
++		if (error) *error = "Memory dump range exceeds the supported offset range";
++		return false;
++	}
++	FILE* f = fopen(filename.c_str(),"wb");
+ 	if (!f) {
+-		DEBUG_ShowMsg("DEBUG: Memory binary dump failed.\n");
+-		return;
++		if (error) *error = "Unable to open memory dump " + filename;
++		return false;
+ 	}
+ 
++	uint64_t bad = 0;
+ 	for (uint32_t x = 0; x < num;x++) {
+ 		uint8_t val;
+-		if (mem_readb_checked((PhysPt)GetAddress(seg,ofs1+x),&val)) val=0;
+-		fwrite(&val,1,1,f);
++		if (mem_readb_checked((PhysPt)GetAddress(seg,ofs1+x),&val)) { val=0; ++bad; }
++		if (fwrite(&val,1,1,f) != 1) {
++			fclose(f);
++			if (error) *error = "Failed while writing memory dump " + filename;
++			return false;
++		}
+ 	}
+ 
+-	fclose(f);
++	const bool ok = fclose(f) == 0;
++	if (unreadable) *unreadable = bad;
++	if (!ok && error) *error = "Failed to finalize memory dump " + filename;
++	return ok;
++}
++
++static void SaveMemoryBin(uint16_t seg, uint32_t ofs1, uint32_t num, const char *filename) {
++	std::string error;
++	if (!DEBUG_DumpMemoryBinary(seg, ofs1, num, filename, NULL, &error)) {
++		DEBUG_ShowMsg("DEBUG: Memory binary dump failed.\n");
++		return;
++	}
+ 	DEBUG_ShowMsg("DEBUG: Memory dump binary success.\n");
+ }
+ 
+diff --git a/src/dos/dos_execute.cpp b/src/dos/dos_execute.cpp
+index ef7d196a7..f3de5c2fc 100644
+--- a/src/dos/dos_execute.cpp
++++ b/src/dos/dos_execute.cpp
+@@ -24,6 +24,9 @@
+ #include <string>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "logging.h"
+ #include "mem.h"
+ #include "dos_inc.h"
+@@ -115,6 +118,9 @@ void DOS_Terminate(uint16_t pspseg,bool tsr,uint8_t exitcode) {
+ 	
+ 	DOS_PSP curpsp(pspseg);
+ 	if (pspseg==curpsp.GetParent()) return;
++#if C_DEBUG
++	AUTOCAP_OnProgramExit(pspseg);
++#endif
+ 	/* Free Files owned by process */
+ 	if (!tsr) curpsp.CloseFiles();
+ 	
+@@ -962,6 +968,10 @@ bool DOS_Execute(const char* name, PhysPt block_pt, uint16_t flags) {
+ 		reg_di=RealOff(sssp);
+ 		reg_bp=0x91c;	/* DOS internal stack begin relict */
+ 		SegSet16(ds,pspseg);SegSet16(es,pspseg);
++#if C_DEBUG
++		DOS_PSP executed(pspseg);
++		AUTOCAP_OnProgramStart(RunningProgram.c_str(), pspseg, executed.GetParent());
++#endif
+ #if C_DEBUG		
+ 		/* Started from debug.com, then set breakpoint at start */
+ 		DEBUG_CheckExecuteBreakpoint(RealSeg(csip),RealOff(csip));
+diff --git a/src/dosbox.cpp b/src/dosbox.cpp
+index d25cccf7d..8e3865f05 100644
+--- a/src/dosbox.cpp
++++ b/src/dosbox.cpp
+@@ -52,9 +52,12 @@
+ #include <ctime>
+ #include <unistd.h>
+ #include "dosbox.h"
+-#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
++#if defined(C_DOSBOX_AGENT)
+ #include "agent/agent_bridge.h"
+-#endif // defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
++#endif
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "debug.h"
+ #include "cpu.h"
+ #include "logging.h"
+@@ -469,8 +472,11 @@ static Bitu Normal_Loop(void) {
+ 
+     try {
+         while (1) {
+-#if defined(C_DEBUG) && defined(C_DOSBOX_AGENT)
++#if defined(C_DOSBOX_AGENT)
+             dosbox_agent::AGENT_BridgePump();
++#endif
++#if C_DEBUG
++            AUTOCAP_PumpSafePoint();
+ #endif
+             if (PIC_RunQueue()) {
+                 /* now is the time to check for the NMI (Non-maskable interrupt) */
+diff --git a/src/gui/menu.cpp b/src/gui/menu.cpp
+index 577d2dcf5..56a502809 100644
+--- a/src/gui/menu.cpp
++++ b/src/gui/menu.cpp
+@@ -844,6 +844,7 @@ char help_command_temp[MENU_HELP_COMMAND_MAX][30];
+ #if C_DEBUG
+ static const char* def_menu_debug[] =
+ {
++    "AutomaticCaptureMenu",
+     "mapper_debugger",
+     "--",
+     "debugger_rundebug",
+@@ -875,6 +876,21 @@ static const char* def_menu_debug[] =
+ #endif
+     NULL
+ };
++static const char* def_menu_autocapture[] =
++{
++	"autocapture_select",
++	"autocapture_generate_example",
++	"--",
++	"autocapture_start",
++	"autocapture_stop",
++	"--",
++	"autocapture_reload",
++	"--",
++	"autocapture_now",
++	"--",
++	"autocapture_status",
++    NULL
++};
+ #elif !defined(MACOSX) && !defined(LINUX) && !defined(HX_DOS) && !defined(C_EMSCRIPTEN)
+ static const char* def_menu_help_debug[] =
+ {
+@@ -2006,6 +2022,7 @@ void ConstructMenu(void) {
+ #if C_DEBUG
+     /* debug menu */
+     ConstructSubMenu(mainMenu.get_item("DebugMenu").get_master_id(), def_menu_debug);
++    ConstructSubMenu(mainMenu.get_item("AutomaticCaptureMenu").get_master_id(), def_menu_autocapture);
+ #elif !defined(MACOSX) && !defined(LINUX) && !defined(HX_DOS) && !defined(C_EMSCRIPTEN)
+     /* help debug menu */
+     ConstructSubMenu(mainMenu.get_item("HelpDebugMenu").get_master_id(), def_menu_help_debug);
+diff --git a/src/gui/menu_callback.cpp b/src/gui/menu_callback.cpp
+index 5359e205b..eaca73a53 100644
+--- a/src/gui/menu_callback.cpp
++++ b/src/gui/menu_callback.cpp
+@@ -19,6 +19,9 @@
+ #include <assert.h>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "menu.h"
+ #include "menudef.h"
+ #include "sdlmain.h"
+@@ -3271,6 +3274,68 @@ bool help_prt_callback(DOSBoxMenu * const /*menu*/, DOSBoxMenu::item * const /*m
+     return true;
+ }
+ 
++#if C_DEBUG
++static bool autocapture_menu_ready = false;
++bool autocapture_select_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem;
++	static const char* patterns[] = { "*.json" };
++	const char* selected = tinyfd_openFileDialog("Select automatic capture configuration", "", 1, patterns, "JSON configuration", 0);
++	if (selected) AUTOCAP_SetConfigurationPath(selected);
++	return true;
++}
++bool autocapture_generate_example_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem;
++	const char* folder = tinyfd_selectFolderDialog("Choose folder for example capture configuration", "");
++	if (!folder) return true;
++	std::string path, error;
++	if (!AUTOCAP_GenerateExampleConfiguration(folder, &path, &error)) {
++		systemmessagebox("Automatic capture", error.c_str(), "ok", "warning", 1);
++		return true;
++	}
++	if (!AUTOCAP_IsActive()) AUTOCAP_SetConfigurationPath(path);
++	const std::string message = "Example configuration saved to:\n" + path +
++		"\n\nCaptures will be saved in the automatic-captures subfolder."
++		"\n\nEdit the JSON file to change the timing or captured assets.";
++	systemmessagebox("Automatic capture", message.c_str(), "ok", "info", 1);
++	return true;
++}
++bool autocapture_start_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem;
++	std::string error;
++	if (!AUTOCAP_Start(&error) && !error.empty()) systemmessagebox("Automatic capture",error.c_str(),"ok","warning",1);
++	return true;
++}
++bool autocapture_stop_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem; AUTOCAP_Stop("user"); return true;
++}
++bool autocapture_reload_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem;
++	std::string error; AUTOCAP_ReloadConfiguration(&error);
++	if (!error.empty()) systemmessagebox("Automatic capture",error.c_str(),"ok","warning",1);
++	return true;
++}
++bool autocapture_now_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem; AUTOCAP_RequestManualCapture(); return true;
++}
++bool autocapture_status_menu_callback(DOSBoxMenu * const menu,DOSBoxMenu::item * const menuitem) {
++	(void)menu; (void)menuitem;
++	const std::string status = AUTOCAP_FormatStatus();
++	systemmessagebox("Automatic capture",status.c_str(),"ok","info",1);
++	return true;
++}
++
++void AUTOCAP_RefreshMenuItems() {
++	if (!autocapture_menu_ready) return;
++	mainMenu.get_item("autocapture_select").enable(true).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_generate_example").enable(true).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_start").enable(!AUTOCAP_IsActive() && AUTOCAP_HasConfiguration()).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_stop").enable(AUTOCAP_IsActive()).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_reload").enable(!AUTOCAP_IsActive() && AUTOCAP_HasConfiguration()).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_now").enable(AUTOCAP_IsAttached()).refresh_item(mainMenu);
++	mainMenu.get_item("autocapture_status").enable(true).refresh_item(mainMenu);
++}
++#endif
++
+ void AllocCallback1() {
+         /* stock top-level menu items */
+         {
+@@ -3891,6 +3956,16 @@ void AllocCallback1() {
+                 mainMenu.alloc_item(DOSBoxMenu::item_type_id,"wait_on_error").set_text("Console wait on error").set_callback_function(wait_on_error_menu_callback).check(sdl.wait_on_error);
+ #endif
+ #if C_DEBUG
++                mainMenu.alloc_item(DOSBoxMenu::submenu_type_id,"AutomaticCaptureMenu").set_text("Automatic capture");
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_select").set_text("Automatic capture: Select configuration...").set_callback_function(autocapture_select_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_generate_example").set_text("Automatic capture: Generate example configuration...").set_callback_function(autocapture_generate_example_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_start").set_text("Automatic capture: Start").set_callback_function(autocapture_start_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_stop").set_text("Automatic capture: Stop").set_callback_function(autocapture_stop_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_reload").set_text("Automatic capture: Reload configuration").set_callback_function(autocapture_reload_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_now").set_text("Automatic capture: Capture now").set_callback_function(autocapture_now_menu_callback);
++                mainMenu.alloc_item(DOSBoxMenu::item_type_id,"autocapture_status").set_text("Automatic capture: Status").set_callback_function(autocapture_status_menu_callback);
++				autocapture_menu_ready = true;
++                AUTOCAP_RefreshMenuItems();
+                 mainMenu.alloc_item(DOSBoxMenu::item_type_id,"show_codetext").set_text("Show code overview").set_callback_function(show_codetext_menu_callback);
+                 mainMenu.alloc_item(DOSBoxMenu::item_type_id,"show_logtext").set_text("Show logging text").set_callback_function(show_logtext_menu_callback);
+                 mainMenu.alloc_item(DOSBoxMenu::item_type_id,"save_logas").set_text("Save logging as...").set_callback_function(save_logas_menu_callback);
+diff --git a/src/gui/render.cpp b/src/gui/render.cpp
+index df45f1bf5..b5b28b76b 100644
+--- a/src/gui/render.cpp
++++ b/src/gui/render.cpp
+@@ -22,6 +22,11 @@
+ #include <math.h>
+ #include <fstream>
+ #include <sstream>
++#include <cstdio>
++#include <cerrno>
++#include <sys/stat.h>
++#include <iomanip>
++#include <limits>
+ 
+ #include "dosbox.h"
+ #include "logging.h"
+@@ -58,6 +63,128 @@ bool useTraditionalRenderCache = false;
+ unsigned char *scalerSourceCacheBuffer=NULL;
+ unsigned int scalerSourceCacheBufferSize=0;
+ 
++extern std::string capturedir;
++extern std::string pathscr;
++extern std::string capture_last_screenshot_path;
++extern bool show_recorded_filename;
++
++static uint64_t capture_render_epoch = 0;
++static uint64_t capture_completed_render_epoch = 0;
++static pic_tickindex_t capture_render_start_ms = 0;
++static pic_tickindex_t capture_render_end_ms = 0;
++static bool capture_render_aborted = false;
++
++std::string RENDER_CaptureSurfaceMetadata() {
++    std::ostringstream out;
++    out << std::boolalpha << std::setprecision(std::numeric_limits<pic_tickindex_t>::max_digits10);
++    out << "{\"provenance\":\"scalerSourceCacheBuffer (exact CAPTURE_AddImage input, not vga.mem.linear)\""
++        << ",\"width\":" << render.src.width << ",\"height\":" << render.src.height
++        << ",\"bpp\":" << render.src.bpp << ",\"pitch\":" << render.scale.cachePitch
++        << ",\"byte_order\":"
++#ifdef WORDS_BIGENDIAN
++        << "\"big\""
++#else
++        << "\"little\""
++#endif
++        << ",\"pixel_format\":";
++#if defined(MACOSX) && !C_SDL2
++    const char* format32 = "XRGB8888";
++#else
++    const char* format32 = "BGRX8888";
++#endif
++    out << '\"' << (render.src.bpp == 32 ? format32 : render.src.bpp == 8 ? "INDEX8" : render.src.bpp == 15 ? "RGB555" : "RGB565") << '\"'
++        << ",\"double_width\":" << (render.src.dblw && render.src.dblw != render.src.dblh)
++        << ",\"double_height\":" << (render.src.dblh && render.src.dblw != render.src.dblh)
++        << ",\"render_epoch\":" << capture_render_epoch
++        << ",\"completed_render_epoch\":" << capture_completed_render_epoch
++        << ",\"updating\":" << render.updating << ",\"last_update_aborted\":" << capture_render_aborted
++        << ",\"update_start_ms\":" << capture_render_start_ms << ",\"update_end_ms\":" << capture_render_end_ms
++        << ",\"input_lines_processed\":" << render.scale.inLine
++        << ",\"video_debug_overlay\":" << video_debug_overlay << ",\"palette_rgb8\":[";
++    for (unsigned int i = 0; i < 256; ++i) {
++        if (i) out << ',';
++        const auto& rgb = render.pal.rgb[i];
++        out << '[' << unsigned(rgb.red) << ',' << unsigned(rgb.green) << ',' << unsigned(rgb.blue) << ']';
++    }
++    return out.str() + "]}";
++}
++
++bool RENDER_SaveCaptureSurface(const std::string& filename, std::string* error) {
++    const uint64_t bytes = uint64_t(render.scale.cachePitch) * render.src.height;
++    if (!render.active || !scalerSourceCacheBuffer || bytes == 0 || bytes > scalerSourceCacheBufferSize) {
++        if (error) *error = "Renderer source cache unavailable or size exceeds allocation";
++        return false;
++    }
++    std::ofstream out(filename.c_str(), std::ios::binary | std::ios::trunc);
++    if (out) out.write(reinterpret_cast<const char*>(scalerSourceCacheBuffer), std::streamsize(bytes));
++    out.close();
++    if (!out) { if (error) *error = "Unable to finalize renderer source cache"; return false; }
++    return true;
++}
++
++bool RENDER_GetCurrentFrameScreenshotGeometry(RenderScreenshotGeometry* geometry) {
++	if (!geometry || !render.active || !scalerSourceCacheBuffer || !render.src.width || !render.src.height)
++		return false;
++	geometry->source_width = static_cast<uint32_t>(render.src.width);
++	geometry->source_height = static_cast<uint32_t>(render.src.height);
++	geometry->source_bpp = static_cast<uint32_t>(render.src.bpp);
++	/* CAPTURE_AddImage only receives an explicit doubling flag when one axis differs. */
++	geometry->double_width = render.src.dblw && render.src.dblw != render.src.dblh;
++	geometry->double_height = render.src.dblh && render.src.dblw != render.src.dblh;
++	geometry->output_width = geometry->source_width * (geometry->double_width ? 2u : 1u);
++	geometry->output_height = geometry->source_height * (geometry->double_height ? 2u : 1u);
++	return true;
++}
++
++bool RENDER_SaveCurrentFramePng(const std::string& filename, std::string* error) {
++#if (C_SSHOT)
++	if (!render.active || !scalerSourceCacheBuffer || !render.src.width || !render.src.height) {
++		if (error) *error = "No rendered frame is available";
++		return false;
++	}
++	const size_t split = filename.find_last_of("/\\");
++	if (split == std::string::npos) {
++		if (error) *error = "Screenshot filename must include its capture directory";
++		return false;
++	}
++	struct stat info;
++	if (stat(filename.c_str(), &info) == 0) {
++		if (error) *error = "Screenshot destination already exists";
++		return false;
++	}
++	const std::string previous_dir = capturedir;
++	const std::string previous_path = pathscr;
++	const bool previous_notification = show_recorded_filename;
++	const Bitu previous_capture_state = CaptureState;
++	capturedir = filename.substr(0, split);
++	show_recorded_filename = false;
++	CaptureState = (previous_capture_state & ~((Bitu)CAPTURE_VIDEO)) | CAPTURE_IMAGE;
++	Bitu flags = 0;
++	if (render.src.dblw != render.src.dblh) {
++		if (render.src.dblw) flags |= CAPTURE_FLAG_DBLW;
++		if (render.src.dblh) flags |= CAPTURE_FLAG_DBLH;
++	}
++	CAPTURE_AddImage(render.src.width, render.src.height, render.src.bpp,
++	                 render.scale.cachePitch, flags, render.src.fps,
++	                 scalerSourceCacheBuffer, (uint8_t*)&render.pal.rgb);
++	const std::string encoded_path = capture_last_screenshot_path;
++	CaptureState = previous_capture_state;
++	capturedir = previous_dir;
++	show_recorded_filename = previous_notification;
++	pathscr = previous_path;
++	if (encoded_path.empty() || rename(encoded_path.c_str(), filename.c_str()) != 0) {
++		if (!encoded_path.empty()) remove(encoded_path.c_str());
++		if (error) *error = "The PNG encoder could not write " + filename;
++		return false;
++	}
++	return true;
++#else
++	(void)filename;
++	if (error) *error = "PNG screenshot support is disabled in this build";
++	return false;
++#endif
++}
++
+ void scalerWriteCacheFree(void);
+ void scalerWriteCacheAlloc(unsigned int p);
+ 
+@@ -446,6 +573,8 @@ bool RENDER_StartUpdate(void) {
+         }
+     }
+     render.updating = true;
++    ++capture_render_epoch;
++    capture_render_start_ms = PIC_FullIndex();
+     return true;
+ }
+ 
+@@ -523,6 +652,9 @@ void RENDER_EndUpdate( bool abort ) {
+         }
+     }
+     render.frameskip.index = (render.frameskip.index + 1) & (RENDER_SKIP_CACHE - 1);
++    capture_render_end_ms = PIC_FullIndex();
++    capture_render_aborted = abort;
++    if (!abort) capture_completed_render_epoch = capture_render_epoch;
+     render.updating=false;
+ 
+     if (pause_on_vsync) {
+diff --git a/src/gui/sdlmain.cpp b/src/gui/sdlmain.cpp
+index a0dad0cda..ea57f7b19 100644
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -135,6 +135,9 @@ char* revert_escape_newlines(const char* aMessage);
+ #include "control.h"
+ #include "dos_inc.h"
+ #include "dosbox.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "menudef.h"
+ #include "pic.h"
+ #include "timer.h"
+@@ -10675,6 +10678,9 @@ fresh_boot:
+         VFILE_Shutdown();
+         PROGRAMS_Shutdown();
+         TIMER_ShutdownTickHandlers();
++#if C_DEBUG
++		AUTOCAP_Stop("emulator_shutdown");
++#endif
+ #if C_DEBUG
+         DEBUG_ShutDown(NULL);
+ #endif
+diff --git a/src/hardware/hardware.cpp b/src/hardware/hardware.cpp
+index 70e1d4a82..85a249200 100644
+--- a/src/hardware/hardware.cpp
++++ b/src/hardware/hardware.cpp
+@@ -72,6 +72,7 @@ extern "C" {
+ bool video_debug_overlay = false;
+ bool skip_encoding_unchanged_frames = false, show_recorded_filename = true;
+ std::string pathvid = "", pathwav = "", pathmtw = "", pathmid = "", pathopl = "", pathscr = "", pathprt = "", pathpcap = "";
++std::string capture_last_screenshot_path;
+ bool systemmessagebox(char const * aTitle, char const * aMessage, char const * aDialogType, char const * aIconType, int aDefaultButton);
+ extern std::string working_dir;
+ 
+@@ -575,7 +576,7 @@ std::string GetCaptureFilePath(const char * type,const char * ext) {
+ FILE * OpenCaptureFile(const char * type,const char * ext) {
+     if (!strcmp(type, "Raw Midi")) pathmid = "";
+     if (!strcmp(type, "Raw Opl")) pathopl = "";
+-    if (!strcmp(type, "Screenshot")) pathscr = "";
++    if (!strcmp(type, "Screenshot")) { pathscr = ""; capture_last_screenshot_path.clear(); }
+     if (!strcmp(type, "Parallel Port Stream")) pathprt = "";
+ 	if(capturedir.empty()) {
+ 		LOG_MSG("Please specify a capture directory");
+@@ -631,6 +632,7 @@ FILE * OpenCaptureFile(const char * type,const char * ext) {
+         if (!strcmp(type, "Raw Opl")) pathopl = file_name;
+         if (!strcmp(type, "Screenshot")) pathscr = file_name;
+         if (!strcmp(type, "Raw Screenshot")) pathscr = file_name;
++        if (!strcmp(type, "Screenshot")) capture_last_screenshot_path = file_name;
+         if (!strcmp(type, "Parallel Port Stream")) pathprt = file_name;
+ 	} else {
+ 		LOG_MSG("Failed to open %s for capturing %s",file_name,type);
+diff --git a/src/hardware/iohandler.cpp b/src/hardware/iohandler.cpp
+index 34222c434..8b340fa30 100644
+--- a/src/hardware/iohandler.cpp
++++ b/src/hardware/iohandler.cpp
+@@ -20,6 +20,9 @@
+ #include <string.h>
+ #include "control.h"
+ #include "dosbox.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "inout.h"
+ #include "logging.h"
+ #include "setup.h"
+@@ -498,6 +501,9 @@ void IO_WriteB(Bitu port,uint8_t val) {
+ 	else {
+ 		IO_USEC_write_delay(0);
+ 		io_writehandlers[0][port](port,val,1);
++#if C_DEBUG
++        AUTOCAP_RecordIO(true, uint32_t(port), val, 1);
++#endif
+ 	}
+ }
+ 
+@@ -509,6 +515,9 @@ void IO_WriteW(Bitu port,uint16_t val) {
+ 	else {
+ 		IO_USEC_write_delay(1);
+ 		io_writehandlers[1][port](port,val,2);
++#if C_DEBUG
++        AUTOCAP_RecordIO(true, uint32_t(port), val, 2);
++#endif
+ 	}
+ }
+ 
+@@ -520,6 +529,9 @@ void IO_WriteD(Bitu port,uint32_t val) {
+ 	else {
+ 		IO_USEC_write_delay(2);
+ 		io_writehandlers[2][port](port,val,4);
++#if C_DEBUG
++        AUTOCAP_RecordIO(true, uint32_t(port), val, 4);
++#endif
+ 	}
+ }
+ 
+@@ -531,6 +543,9 @@ uint8_t IO_ReadB(Bitu port) {
+ 	else {
+ 		IO_USEC_read_delay(0);
+ 		retval = (uint8_t)io_readhandlers[0][port](port,1);
++#if C_DEBUG
++        AUTOCAP_RecordIO(false, uint32_t(port), retval, 1);
++#endif
+ 	}
+ 	log_io(0, false, port, retval);
+ 	return retval;
+@@ -544,6 +559,9 @@ uint16_t IO_ReadW(Bitu port) {
+ 	else {
+ 		IO_USEC_read_delay(1);
+ 		retval = (uint16_t)io_readhandlers[1][port](port,2);
++#if C_DEBUG
++        AUTOCAP_RecordIO(false, uint32_t(port), retval, 2);
++#endif
+ 	}
+ 	log_io(1, false, port, retval);
+ 	return retval;
+@@ -557,6 +575,9 @@ uint32_t IO_ReadD(Bitu port) {
+ 	else {
+ 		IO_USEC_read_delay(2);
+ 		retval = (uint32_t)io_readhandlers[2][port](port,4);
++#if C_DEBUG
++        AUTOCAP_RecordIO(false, uint32_t(port), retval, 4);
++#endif
+ 	}
+ 	log_io(2, false, port, retval);
+ 	return retval;
+diff --git a/src/hardware/keyboard.cpp b/src/hardware/keyboard.cpp
+index 92ae95608..c4b13b730 100644
+--- a/src/hardware/keyboard.cpp
++++ b/src/hardware/keyboard.cpp
+@@ -19,6 +19,10 @@
+ #include <assert.h>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include <sstream>
++#include "autocapture.h"
++#endif
+ #include "keyboard.h"
+ #include "logging.h"
+ #include "support.h"
+@@ -153,6 +157,40 @@ static struct {
+     bool rightshift_pressed;
+ } keyb;
+ 
++#if C_DEBUG
++std::string AUTOCAP_KeyboardStateJson() {
++    std::ostringstream out;
++    out << std::boolalpha;
++    out << "{\"supported_machine\":" << (!IS_PC98_ARCH && machine != MCH_PCJR)
++        << ",\"status64\":" << unsigned(0x1c | (keyb.p60changed ? 1 : 0) | (keyb.auxchanged ? 0x20 : 0))
++        << ",\"transfer_delay_ms\":" << KEYDELAY
++        << ",\"host_input_queue_available\":false,\"p60data\":" << unsigned(keyb.p60data)
++        << ",\"p60changed\":" << keyb.p60changed << ",\"auxchanged\":" << keyb.auxchanged
++        << ",\"buffer_pos\":" << keyb.pos << ",\"buffer_used\":" << keyb.used
++        << ",\"buffer\":[";
++    for (unsigned int i = 0; i < KEYBUFSIZE; ++i) { if (i) out << ','; out << keyb.buffer[i]; }
++    out << "],\"controller_buffer_pos\":" << keyb.buf8042_pos
++        << ",\"controller_buffer_len\":" << keyb.buf8042_len << ",\"controller_buffer\":[";
++    for (unsigned int i = 0; i < 8; ++i) { if (i) out << ','; out << unsigned(keyb.buf8042[i]); }
++    out << "],\"pending_key\":" << keyb.pending_key << ",\"pending_key_state\":" << keyb.pending_key_state
++        << ",\"command\":" << unsigned(keyb.command) << ",\"aux_command\":" << unsigned(keyb.aux_command)
++        << ",\"led_state\":" << keyb.led_state << ",\"scanset\":" << unsigned(keyb.scanset)
++        << ",\"enable_aux\":" << keyb.enable_aux << ",\"reset\":" << keyb.reset
++        << ",\"active\":" << keyb.active << ",\"scanning\":" << keyb.scanning
++        << ",\"auxactive\":" << keyb.auxactive << ",\"scheduled\":" << keyb.scheduled
++        << ",\"cb_override_inhibit\":" << keyb.cb_override_inhibit
++        << ",\"cb_irq1\":" << keyb.cb_irq1 << ",\"cb_irq12\":" << keyb.cb_irq12
++        << ",\"cb_xlat\":" << keyb.cb_xlat << ",\"cb_sys\":" << keyb.cb_sys
++        << ",\"repeat_key\":" << unsigned(keyb.repeat.key) << ",\"repeat_wait\":" << keyb.repeat.wait
++        << ",\"repeat_pause\":" << keyb.repeat.pause << ",\"repeat_rate\":" << keyb.repeat.rate
++        << ",\"leftalt_pressed\":" << keyb.leftalt_pressed << ",\"rightalt_pressed\":" << keyb.rightalt_pressed
++        << ",\"leftctrl_pressed\":" << keyb.leftctrl_pressed << ",\"rightctrl_pressed\":" << keyb.rightctrl_pressed
++        << ",\"leftshift_pressed\":" << keyb.leftshift_pressed << ",\"rightshift_pressed\":" << keyb.rightshift_pressed
++        << ",\"ps2mouse_state_available\":false}";
++    return out.str();
++}
++#endif
++
+ void PCjr_stuff_scancode(const unsigned char c) {
+     keyb.p60data = c;
+ }
+@@ -1907,6 +1945,9 @@ static void KEYBOARD_TickHandler(void) {
+ void APM_Suspend_Wakeup_Key(void);
+ 
+ void KEYBOARD_AddKey(KBD_KEYS keytype,bool pressed) {
++#if C_DEBUG
++    AUTOCAP_RecordEvent(pressed ? "keyboard_key_down" : "keyboard_key_up", uint32_t(keytype));
++#endif
+     /* If the BIOS has put the system into APM suspend, let certain keys wake it up again.
+      * Send on RELEASE so that the key isn't also typed into the guest OS. */
+     if (!pressed && (keytype == KBD_space))
+diff --git a/src/hardware/pic.cpp b/src/hardware/pic.cpp
+index e2edd2428..dcc414c3a 100644
+--- a/src/hardware/pic.cpp
++++ b/src/hardware/pic.cpp
+@@ -19,6 +19,12 @@
+ #include <assert.h>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include <sstream>
++#include <iomanip>
++#include <limits>
++#include "autocapture.h"
++#endif
+ #include "inout.h"
+ #include "cpu.h"
+ #include "callback.h"
+@@ -238,6 +244,43 @@ static struct {
+     PICEntry * next_entry;
+ } pic_queue;
+ 
++#if C_DEBUG
++std::string AUTOCAP_PICStateJson() {
++    std::ostringstream out;
++    out << std::boolalpha << std::setprecision(std::numeric_limits<pic_tickindex_t>::max_digits10);
++    out << "{\"ticks\":" << PIC_Ticks << ",\"sample_ms\":" << PIC_FullIndex()
++        << ",\"irq_check\":" << PIC_IRQCheck << ",\"irq_check_pending\":" << PIC_IRQCheckPending
++        << ",\"slave_enabled\":" << enable_slave_pic << ",\"cascade_irq\":" << master_cascade_irq
++        << ",\"irq_delay_ns\":" << PIC_irq_delay_ns
++        << ",\"never_mark_cascade_in_service\":" << never_mark_cascade_in_service
++        << ",\"ignore_cascade_in_service\":" << ignore_cascade_in_service
++        << ",\"cpu_cycle_max\":" << CPU_CycleMax << ",\"cpu_cycle_left\":" << CPU_CycleLeft
++        << ",\"cpu_cycles\":" << CPU_Cycles << ",\"controllers\":[";
++    for (unsigned int i = 0; i < 2; ++i) {
++        const auto& p = pics[i];
++        if (i) out << ',';
++        out << "{\"index\":" << i << ",\"irr\":" << unsigned(p.irr)
++            << ",\"isr\":" << unsigned(p.isr) << ",\"imr\":" << unsigned(p.imr)
++            << ",\"input\":" << unsigned(p.input) << ",\"edge\":" << unsigned(p.edge)
++            << ",\"imrr\":" << unsigned(p.imrr) << ",\"isrr\":" << unsigned(p.isrr)
++            << ",\"isr_ignore\":" << unsigned(p.isr_ignore)
++            << ",\"active_irq\":" << unsigned(p.active_irq) << ",\"vector_base\":" << unsigned(p.vector_base)
++            << ",\"icw_words\":" << p.icw_words << ",\"icw_index\":" << p.icw_index
++            << ",\"special\":" << p.special << ",\"auto_eoi\":" << p.auto_eoi
++            << ",\"rotate_on_auto_eoi\":" << p.rotate_on_auto_eoi
++            << ",\"single\":" << p.single << ",\"read_isr\":" << p.request_issr << '}';
++    }
++    out << "],\"scheduler_queue\":[";
++    bool first = true;
++    for (const PICEntry* e = pic_queue.next_entry; e; e = e->next) {
++        if (!first) out << ',';
++        first = false;
++        out << "{\"index_ms\":" << e->index << ",\"value\":" << e->value << ",\"handler\":null}";
++    }
++    return out.str() + "],\"scheduler_handler_identity_available\":false}";
++}
++#endif
++
+ static void write_command(Bitu port,Bitu val,Bitu iolen) {
+     (void)iolen;//UNUSED
+     PIC_Controller * pic=&pics[(port==0x20/*IBM*/ || port==0x00/*PC-98*/) ? 0 : 1];
+@@ -401,6 +444,9 @@ void PIC_EdgeTrigger(Bitu irq,bool set) {
+ /* FIXME: This should be called something else that's true to the ISA bus, like PIC_PulseIRQ, not Activate IRQ.
+  *        ISA interrupts are edge triggered, not level triggered. */
+ void PIC_ActivateIRQ(Bitu irq) {
++#if C_DEBUG
++    AUTOCAP_RecordEvent("irq_activate_requested", uint32_t(irq));
++#endif
+     /* Remember what was once IRQ 2 on PC/XT is IRQ 9 on PC/AT */
+     if (IS_PC98_ARCH) {
+         if (irq == 7) {
+@@ -426,6 +472,9 @@ void PIC_ActivateIRQ(Bitu irq) {
+ }
+ 
+ void PIC_DeActivateIRQ(Bitu irq) {
++#if C_DEBUG
++    AUTOCAP_RecordEvent("irq_deactivate_requested", uint32_t(irq));
++#endif
+     /* Remember what was once IRQ 2 on PC/XT is IRQ 9 on PC/AT */
+     if (IS_PC98_ARCH) {
+         if (irq == 7) return;
+@@ -530,11 +579,17 @@ static void slave_startIRQ(){
+ 
+     slave.start_irq(pic1_irq);
+     master.start_irq(master_cascade_irq);
++#if C_DEBUG
++    AUTOCAP_RecordEvent("irq_delivery", uint32_t(pic1_irq + 8));
++#endif
+     CPU_HW_Interrupt((unsigned int)slave.vector_base + (unsigned int)pic1_irq);
+ }
+ 
+ static void inline master_startIRQ(Bitu i){
+     master.start_irq(i);
++#if C_DEBUG
++    AUTOCAP_RecordEvent("irq_delivery", uint32_t(i));
++#endif
+     CPU_HW_Interrupt(master.vector_base + i);
+ }
+ 
+diff --git a/src/hardware/timer.cpp b/src/hardware/timer.cpp
+index ac6231721..d44ea70d3 100644
+--- a/src/hardware/timer.cpp
++++ b/src/hardware/timer.cpp
+@@ -22,6 +22,12 @@
+ #include <cstdint>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include <sstream>
++#include <iomanip>
++#include <limits>
++#include "autocapture.h"
++#endif
+ #include "inout.h"
+ #include "logging.h"
+ #include "pic.h"
+@@ -394,6 +400,45 @@ struct PIT_Block {
+ 
+ static PIT_Block pit[3];
+ 
++#if C_DEBUG
++// All time tracking is performed on a COPY. In particular this must not latch
++// the real timer, advance its read phase, or change its pending reload.
++std::string AUTOCAP_PITStateJson() {
++    const auto sample_ms = PIC_FullIndex();
++    std::ostringstream out;
++    out << std::boolalpha << std::setprecision(std::numeric_limits<pic_tickindex_t>::max_digits10);
++    out << "{\"sample_ms\":" << sample_ms << ",\"tick_rate_hz\":" << PIT_TICK_RATE
++        << ",\"live_count_method\":\"track_time_and_read_counter_on_copy_no_guest_port_read\",\"channels\":[";
++    for (unsigned int i = 0; i < 3; ++i) {
++        const auto& raw = pit[i];
++        auto projected = raw;
++        const bool valid = raw.cntr_cur != 0 && raw.delay > 0;
++        if (valid) projected.track_time(sample_ms);
++        const auto count = valid ? projected.read_counter() : raw.last_counter;
++        if (i) out << ',';
++        out << "{\"channel\":" << i << ",\"mode\":" << unsigned(raw.mode)
++            << ",\"bcd\":" << raw.bcd << ",\"reload_pending\":" << raw.cntr
++            << ",\"reload_active\":" << raw.cntr_cur << ",\"start_ms\":" << raw.start
++            << ",\"tracked_ms\":" << raw.now << ",\"delay_ms\":" << raw.delay
++            << ",\"projected_start_ms\":" << projected.start
++            << ",\"live_count_valid\":" << valid << ",\"live_count\":" << count.counter
++            << ",\"live_cycle\":" << count.cycle << ",\"read_latch\":" << raw.read_latch
++            << ",\"write_latch\":" << raw.write_latch << ",\"read_phase\":" << unsigned(raw.read_state)
++            << ",\"write_phase\":" << unsigned(raw.write_state)
++            << ",\"cycle_base\":" << unsigned(raw.cycle_base) << ",\"gate\":" << raw.gate
++            << ",\"stored_output\":" << raw.output
++            << ",\"projected_output\":" << projected.get_output_from_counter(count)
++            << ",\"new_mode\":" << raw.new_mode << ",\"counting\":" << raw.counting
++            << ",\"update_count\":" << raw.update_count << ",\"go_read_latch\":" << raw.go_read_latch
++            << ",\"status_latch\":" << unsigned(raw.latched_timerstatus)
++            << ",\"status_latch_locked\":" << raw.latched_timerstatus_locked
++            << ",\"counterstatus_set\":" << raw.counterstatus_set
++            << ",\"last_count\":" << raw.last_counter.counter << ",\"last_cycle\":" << raw.last_counter.cycle << '}';
++    }
++    return out.str() + "]}";
++}
++#endif
++
+ unsigned long PIT_TICK_RATE = PIT_TICK_RATE_IBM;
+ 
+ pic_tickindex_t VGA_PITSync_delay();
+diff --git a/src/ints/bios.cpp b/src/ints/bios.cpp
+index ac2b63503..ab221aec3 100644
+--- a/src/ints/bios.cpp
++++ b/src/ints/bios.cpp
+@@ -22,6 +22,8 @@
+ #include "mem.h"
+ #include "cpu.h"
+ #include "bios.h"
++#include "autocapture.h"
++#include <sstream>
+ #include "regs.h"
+ #include "timer.h"
+ #include "cpu.h"
+@@ -6557,7 +6559,40 @@ bool sync_time_timerrate_warning = false;
+ 
+ uint32_t PIT0_GetAssignedCounter(void);
+ 
++#if C_DEBUG
++// Passive RAM/global snapshot; no CMOS/keyboard/device I/O.
++std::string AUTOCAP_BIOSTimerStateJson()
++{
++    std::ostringstream out;
++    out << std::boolalpha
++        << "{\"bios_ticks\":" << mem_readd(BIOS_TIMER)
++        << ",\"midnight_rollovers\":" << unsigned(mem_readb(BIOS_24_HOURS_FLAG))
++        << ",\"keyboard_state\":" << unsigned(mem_readb(BIOS_KEYBOARD_STATE))
++        << ",\"keyboard_leds\":" << unsigned(mem_readb(BIOS_KEYBOARD_LEDS))
++        << ",\"motor_timeout\":" << unsigned(mem_readb(BIOS_DISK_MOTOR_TIMEOUT))
++        << ",\"drive_running\":" << unsigned(mem_readb(BIOS_DRIVE_RUNNING))
++        << ",\"sync_time\":" << sync_time
++        << ",\"manualtime\":" << manualtime
++        << ",\"cmos_sync_flag\":" << cmos_sync_flag
++        << ",\"cmos_sync_hour\":" << unsigned(cmos_sync_hour)
++        << ",\"cmos_sync_minute\":" << unsigned(cmos_sync_min)
++        << ",\"cmos_sync_second\":" << unsigned(cmos_sync_sec)
++        << ",\"synchronize_keyboard_leds\":" << enable_bios_timer_synchronize_keyboard_leds
++        << ",\"egavga_arch\":" << bool(IS_EGAVGA_ARCH)
++        << ",\"machine_type\":" << unsigned(machine)
++        << ",\"bootdrive\":" << bootdrive
++        << ",\"is_dosv\":" << bool(IS_DOSV)
++        << ",\"is_dos_cjk\":" << bool(IS_DOS_CJK)
++        << ",\"j3_is_japanese\":" << bool(J3_IsJapanese())
++        << ",\"pit_tick_rate_hz\":" << PIT_TICK_RATE << '}';
++    return out.str();
++}
++#endif
++
+ static Bitu INT8_Handler(void) {
++#if C_DEBUG
++    AUTOCAP_RecordBIOSTimerEvent("bios_timer_callback_enter");
++#endif
+     /* Increase the bios tick counter */
+     uint32_t value = mem_readd(BIOS_TIMER) + 1;
+     if(value >= 0x1800B0) {
+@@ -6661,6 +6696,9 @@ static Bitu INT8_Handler(void) {
+     if (val || !IS_EGAVGA_ARCH) mem_writeb(BIOS_DISK_MOTOR_TIMEOUT,val-1);
+     /* clear FDD motor bits when counter reaches zero */
+     if (val == 1) mem_writeb(BIOS_DRIVE_RUNNING,mem_readb(BIOS_DRIVE_RUNNING) & 0xF0);
++#if C_DEBUG
++    AUTOCAP_RecordBIOSTimerEvent("bios_timer_callback_exit");
++#endif
+     return CBRET_NONE;
+ }
+ #undef DOSBOX_CLOCKSYNC
+diff --git a/src/ints/bios_keyboard.cpp b/src/ints/bios_keyboard.cpp
+index bcf8931ed..569e3a300 100644
+--- a/src/ints/bios_keyboard.cpp
++++ b/src/ints/bios_keyboard.cpp
+@@ -19,6 +19,9 @@
+ #include <queue>
+ 
+ #include "dosbox.h"
++#if C_DEBUG
++#include "autocapture.h"
++#endif
+ #include "callback.h"
+ #include "logging.h"
+ #include "mem.h"
+@@ -1409,6 +1412,9 @@ Bitu INT16_Handler(void) {
+         INT28_AllowOnce = true;
+         if (!check_key(temp)) {
+             CALLBACK_SZF(true);
++#if C_DEBUG
++            AUTOCAP_RecordEvent("bios_int16_11_poll_zf1", reg_ax);
++#endif
+         } else {
+             CALLBACK_SZF(false);
+             if (!IS_PC98_ARCH && ((temp&0xff)==0xf0) && (temp>>8)) {
+@@ -1416,6 +1422,9 @@ Bitu INT16_Handler(void) {
+                 temp&=0xff00;
+             }
+             reg_ax=temp;
++#if C_DEBUG
++            AUTOCAP_RecordEvent("bios_int16_11_poll_zf0", reg_ax);
++#endif
+         }
+         break;
+     case 0x02:  /* GET SHIFT FLAGS */
+diff --git a/src/shell/shell.cpp b/src/shell/shell.cpp
+index 935545472..45403de6a 100644
+--- a/src/shell/shell.cpp
++++ b/src/shell/shell.cpp
+@@ -77,11 +77,9 @@ uint16_t shell_psp = 0;
+ Bitu call_int2e = 0;
+ Bitu call_int23 = 0;
+ 
+-#if defined(C_DOSBOX_AGENT)
+ uint16_t DOS_ShellGetPSP() {
+ 	return shell_psp;
+ }
+-#endif
+ 
+ std::string GetDOSBoxXPath(bool withexe=false);
+ const char* DOS_GetLoadedLayout(void);
+diff --git a/tests/agent/verify_automatic_capture.ps1 b/tests/agent/verify_automatic_capture.ps1
+new file mode 100644
+index 000000000..b3a60d5ca
+--- /dev/null
++++ b/tests/agent/verify_automatic_capture.ps1
+@@ -0,0 +1,137 @@
++[CmdletBinding()]
++param(
++    [Parameter(Mandatory = $true)]
++    [string]$SessionDirectory,
++    [string]$Version1SessionDirectory = ''
++)
++
++$ErrorActionPreference = 'Stop'
++
++function Assert-Condition {
++    param(
++        [bool]$Condition,
++        [string]$Message
++    )
++
++    if (!$Condition) {
++        throw $Message
++    }
++}
++
++function Get-PngGeometry {
++    param([string]$Path)
++
++    $bytes = [System.IO.File]::ReadAllBytes($Path)
++    Assert-Condition ($bytes.Length -ge 24) "PNG is shorter than its IHDR header: $Path"
++    $signature = [byte[]](0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
++    for ($index = 0; $index -lt $signature.Length; ++$index) {
++        Assert-Condition ($bytes[$index] -eq $signature[$index]) "Invalid PNG signature: $Path"
++    }
++    Assert-Condition ([System.Text.Encoding]::ASCII.GetString($bytes, 12, 4) -eq 'IHDR') "PNG has no IHDR chunk: $Path"
++    return [pscustomobject]@{
++        Width = ([uint32]$bytes[16] -shl 24) -bor ([uint32]$bytes[17] -shl 16) -bor ([uint32]$bytes[18] -shl 8) -bor [uint32]$bytes[19]
++        Height = ([uint32]$bytes[20] -shl 24) -bor ([uint32]$bytes[21] -shl 16) -bor ([uint32]$bytes[22] -shl 8) -bor [uint32]$bytes[23]
++    }
++}
++
++function Test-AssetSizes {
++    param(
++        [object]$Capture,
++        [string]$CaptureDirectory,
++        [bool]$ExpectV2
++    )
++
++    foreach ($property in $Capture.assets.PSObject.Properties) {
++        $asset = $property.Value
++        if ($asset.status -eq 'complete' -or (!$ExpectV2 -and $asset.status -eq 'ok')) {
++            Assert-Condition (![string]::IsNullOrWhiteSpace($asset.file)) "Complete asset $($property.Name) has no file"
++            $path = Join-Path $CaptureDirectory $asset.file
++            Assert-Condition (Test-Path -LiteralPath $path -PathType Leaf) "Complete asset $($property.Name) is missing: $path"
++            $actualSize = [uint64]([System.IO.FileInfo]$path).Length
++            Assert-Condition ($actualSize -eq [uint64]$asset.size) "Asset $($property.Name) reports size $($asset.size), but file size is $actualSize"
++        }
++        if ($ExpectV2 -and $asset.status -eq 'skipped') {
++            Assert-Condition ($asset.reason -eq 'cadence') "Skipped asset $($property.Name) has an unexpected reason"
++            Assert-Condition ([uint64]$asset.every_n_captures -gt 1) "Skipped asset $($property.Name) has no configured cadence"
++            Assert-Condition ([uint64]$asset.size -eq 0) "Skipped asset $($property.Name) has a non-zero size"
++            Assert-Condition ([string]::IsNullOrEmpty($asset.file)) "Skipped asset $($property.Name) unexpectedly has a file"
++        }
++    }
++}
++
++function Test-V2Session {
++    param([string]$Path)
++
++    $session = Get-Content -LiteralPath (Join-Path $Path 'session.json') -Raw | ConvertFrom-Json
++    Assert-Condition ($session.format_version -eq 2) 'Expected a version-2 capture session'
++    $captures = @(Get-ChildItem -LiteralPath $Path -Directory -Filter 'capture_*' | Sort-Object Name)
++    Assert-Condition ($captures.Count -gt 0) 'No finalized captures were found'
++
++    foreach ($directory in $captures) {
++        $capture = Get-Content -LiteralPath (Join-Path $directory.FullName 'capture.json') -Raw | ConvertFrom-Json
++        Assert-Condition ($capture.format_version -eq 2) "$($directory.Name) is not version 2"
++        Test-AssetSizes $capture $directory.FullName $true
++
++        $screenshot = $capture.assets.screenshot
++        if ($null -ne $screenshot -and $screenshot.status -eq 'complete') {
++            $geometry = $screenshot.metadata.screenshot_geometry
++            Assert-Condition ($null -ne $geometry) "$($directory.Name) has no screenshot geometry"
++            $png = Get-PngGeometry (Join-Path $directory.FullName $screenshot.file)
++            Assert-Condition ($png.Width -eq [uint32]$geometry.output_width) "$($directory.Name) screenshot width disagrees with PNG"
++            Assert-Condition ($png.Height -eq [uint32]$geometry.output_height) "$($directory.Name) screenshot height disagrees with PNG"
++            $scaleWidth = if ($geometry.double_width) { 2 } else { 1 }
++            $scaleHeight = if ($geometry.double_height) { 2 } else { 1 }
++            Assert-Condition ($png.Width -eq ([uint32]$geometry.source_width * $scaleWidth)) "$($directory.Name) screenshot horizontal scaling is inconsistent"
++            Assert-Condition ($png.Height -eq ([uint32]$geometry.source_height * $scaleHeight)) "$($directory.Name) screenshot vertical scaling is inconsistent"
++        }
++
++        $machine = $capture.assets.machine_state
++        if ($null -ne $machine -and $machine.status -eq 'complete') {
++            $state = Get-Content -LiteralPath (Join-Path $directory.FullName $machine.file) -Raw | ConvertFrom-Json
++            foreach ($name in @('cs', 'ds', 'es', 'ss', 'fs', 'gs')) {
++                $segment = $state.segments.$name
++                Assert-Condition ($null -ne $segment) "$($directory.Name) is missing $name machine state"
++                Assert-Condition (![string]::IsNullOrWhiteSpace($segment.selector)) "$($directory.Name) has no $name selector"
++                Assert-Condition (![string]::IsNullOrWhiteSpace($segment.base)) "$($directory.Name) has no $name base"
++            }
++            if ($null -ne $capture.assets.registers -and $capture.assets.registers.status -eq 'complete') {
++                $registers = Get-Content -LiteralPath (Join-Path $directory.FullName $capture.assets.registers.file) -Raw | ConvertFrom-Json
++                Assert-Condition ($state.segments.cs.selector -eq $registers.cs) "$($directory.Name) machine-state capture changed CS"
++            }
++        }
++
++        $vga = $capture.assets.vga_state
++        if ($null -ne $vga -and $vga.status -eq 'complete') {
++            $state = Get-Content -LiteralPath (Join-Path $directory.FullName $vga.file) -Raw | ConvertFrom-Json
++            if ($null -ne $state.dac) {
++                foreach ($field in @('read_index', 'write_index', 'component_state', 'pel_index', 'pel_mask')) {
++                    Assert-Condition ($null -ne $state.dac.$field) "$($directory.Name) is missing DAC $field"
++                    Assert-Condition ([uint32]$state.dac.$field -le 255) "$($directory.Name) has an invalid DAC $field"
++                }
++            }
++        }
++    }
++}
++
++function Test-Version1Session {
++    param([string]$Path)
++
++    $session = Get-Content -LiteralPath (Join-Path $Path 'session.json') -Raw | ConvertFrom-Json
++    Assert-Condition ($session.format_version -eq 1) 'Expected a version-1 capture session'
++    Assert-Condition ($session.configuration.version -eq 1) 'Version-1 session did not retain its configuration version'
++    Assert-Condition (![string]::IsNullOrWhiteSpace($session.configuration.output.directory)) 'Version-1 configuration output.directory is missing'
++    foreach ($directory in @(Get-ChildItem -LiteralPath $Path -Directory -Filter 'capture_*')) {
++        $capture = Get-Content -LiteralPath (Join-Path $directory.FullName 'capture.json') -Raw | ConvertFrom-Json
++        Assert-Condition ($capture.format_version -eq 1) "$($directory.Name) is not version 1"
++        foreach ($property in $capture.assets.PSObject.Properties) {
++            Assert-Condition ($property.Value.status -ne 'complete') "Version-1 asset $($property.Name) changed its status spelling"
++        }
++        Test-AssetSizes $capture $directory.FullName $false
++    }
++}
++
++Test-V2Session (Resolve-Path -LiteralPath $SessionDirectory).Path
++if (![string]::IsNullOrWhiteSpace($Version1SessionDirectory)) {
++    Test-Version1Session (Resolve-Path -LiteralPath $Version1SessionDirectory).Path
++}
++Write-Output 'Automatic-capture format validation passed.'
+diff --git a/vs/dosbox-x.vcxproj b/vs/dosbox-x.vcxproj
+index ebf07a9a6..d3dc931e3 100644
+--- a/vs/dosbox-x.vcxproj
++++ b/vs/dosbox-x.vcxproj
+@@ -1224,6 +1224,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
+     <ClCompile Include="..\src\cpu\modrm.cpp" />
+     <ClCompile Include="..\src\cpu\paging.cpp" />
+     <ClCompile Include="..\src\debug\debug.cpp" />
++    <ClCompile Include="..\src\debug\autocapture.cpp" />
+     <ClCompile Include="..\src\agent\bridge\agent_bridge.cpp" />
+     <ClCompile Include="..\src\agent\debugger\debugger_adapter.cpp" />
+ 	<ClCompile Include="..\src\agent\parser\debugger_output_parser.cpp" />
+@@ -1761,6 +1762,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
+     <ClInclude Include="..\include\crypt.h" />
+     <ClInclude Include="..\include\cs4231.h" />
+     <ClInclude Include="..\include\debug.h" />
++    <ClInclude Include="..\include\autocapture.h" />
+     <ClInclude Include="..\include\agent\agent_bridge.h" />
+     <ClInclude Include="..\include\agent\agent_protocol.h" />
+     <ClInclude Include="..\include\agent\agent_server.h" />
+diff --git a/vs/dosbox-x.vcxproj.filters b/vs/dosbox-x.vcxproj.filters
+index 8ed3d2134..f51cede28 100644
+--- a/vs/dosbox-x.vcxproj.filters
++++ b/vs/dosbox-x.vcxproj.filters
+@@ -852,9 +852,12 @@
+     <ClCompile Include="..\src\hardware\RetroWaveLib\Platform\Win32_SerialPort.c">
+       <Filter>Sources\hardware\RetroWaveLib</Filter>
+     </ClCompile>
+-    <ClCompile Include="..\src\debug\debug.cpp">
+-      <Filter>Sources\debug</Filter>
+-    </ClCompile>
++    <ClCompile Include="..\src\debug\debug.cpp">
++      <Filter>Sources\debug</Filter>
++    </ClCompile>
++    <ClCompile Include="..\src\debug\autocapture.cpp">
++      <Filter>Sources\debug</Filter>
++    </ClCompile>
+     <ClCompile Include="..\src\debug\debug_disasm.cpp">
+       <Filter>Sources\debug</Filter>
+     </ClCompile>
+@@ -2183,9 +2186,12 @@
+     <ClInclude Include="..\include\cs4231.h">
+       <Filter>Includes</Filter>
+     </ClInclude>
+-    <ClInclude Include="..\include\debug.h">
+-      <Filter>Includes</Filter>
+-    </ClInclude>
++    <ClInclude Include="..\include\debug.h">
++      <Filter>Includes</Filter>
++    </ClInclude>
++    <ClInclude Include="..\include\autocapture.h">
++      <Filter>Includes</Filter>
++    </ClInclude>
+     <ClInclude Include="..\include\dma.h">
+       <Filter>Includes</Filter>
+     </ClInclude>
+@@ -2744,4 +2750,4 @@
+   <ItemGroup>
+     <Natvis Include="String.natvis" />
+   </ItemGroup>
+-</Project>
+\ No newline at end of file
++</Project>

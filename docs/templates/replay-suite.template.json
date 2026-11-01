@@ -1,0 +1,15 @@
+{
+  "required_stages": ["routine"],
+  "timing_model": "Agent must document the actual captured or controlled schedule and its limits.",
+  "cases": [
+    {
+      "name": "Agent configures a real checkpoint and interval",
+      "stage": "routine",
+      "capture": 0,
+      "contract": "comparison-contract.json",
+      "stop_linear": "0x0",
+      "instruction_limit": 1000000,
+      "javascript_command": ["node", "translated-driver.mjs", "{input}", "{output}"]
+    }
+  ]
+}
